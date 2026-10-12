@@ -9,6 +9,7 @@ import 'battery_controller.dart';
 import 'device_profile.dart';
 import 'gps_controller.dart';
 import 'device_protocol.dart';
+import 'bms_details.dart';
 
 void main() => runApp(const AntApp());
 
@@ -77,11 +78,11 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
       ]));
   }
 
-  Future<void> authenticateBoard() async {
+  Future<void> authenticateBoard({int level = 3}) async {
     final generation = c.connectionGeneration;
-    final password = await askSecret('校验三级权限', hint: '输入已有 8 位 ASCII 密码；不保存，不尝试默认密码');
+    final password = await askSecret('校验 $level 级权限', hint: '输入已有 8 位 ASCII 密码；不保存，不尝试默认密码');
     if (!mounted || password == null || generation != c.connectionGeneration) return;
-    try { await c.authenticate(password); }
+    try { await c.authenticate(password, level: level); }
     catch (error) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
     }
@@ -511,18 +512,16 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
         ),
       ),
       heading('保护与告警'),
-      box(
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('保护位：${s?['protection_bits'] ?? '--'}'),
-            const SizedBox(height: 8),
-            Text('告警位：${s?['warning_bits'] ?? '--'}'),
-            const SizedBox(height: 8),
-            muted('保留原始位域，未知位不会被隐藏。'),
-          ],
-        ),
-      ),
+      box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('保护：${decodeBmsBits(s?['protection_bits'] as String?).join("；").isEmpty ? "无已报告保护位" : decodeBmsBits(s?['protection_bits'] as String?).join("；")}'),
+        const SizedBox(height: 8),
+        Text('告警：${decodeBmsBits(s?['warning_bits'] as String?, warning: true).join("；").isEmpty ? "无已报告告警位" : decodeBmsBits(s?['warning_bits'] as String?, warning: true).join("；")}'),
+        ExpansionTile(tilePadding: EdgeInsets.zero, title: const Text('运行状态与原始位域'), children: [
+          Text(decodeBmsBits(s?['warning_bits'] as String?, warning: true, states: true).join('；')),
+          SelectableText('保护：${s?['protection_bits'] ?? "--"}\n告警：${s?['warning_bits'] ?? "--"}'),
+        ]),
+        muted(c.stale ? '连接未更新：上述为最后读数，不能用于判断当前故障' : '状态位与告警分开显示，未知位保留'),
+      ])),
       if (s == null)
         Padding(
           padding: const EdgeInsets.only(top: 20),
@@ -996,7 +995,12 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
           param('串数', c.isMeter ? '${s?['reported_cell_count'] ?? "--"}' : s == null ? '--' : '${(s!['cells'] as List).length}'),
           param('额定容量', '${number('capacity_ah', 1)} Ah'),
           param('SOH', '${number('soh', 0)} %'),
+          param('电池类型', batteryChemistry(s?['battery_type'] as num?)),
           param('设备累计运行', s?['runtime_s'] == null ? '--' : '${s!['runtime_s']} 秒'),
+          param('累计充电容量', '${number('total_charge_ah', 3)} Ah'),
+          param('累计放电容量', '${number('total_discharge_ah', 3)} Ah'),
+          param('累计充电时间', elapsedSeconds(s?['total_charge_s'] as num?)),
+          param('累计放电时间', elapsedSeconds(s?['total_discharge_s'] as num?)),
           param('写入与控制', c.isMeter ? '中继只读' : '均衡 / 重启（需三级权限）'),
           if (c.isMeter) param('中继保护板名称', s?['relay_name']?.toString() ?? '--'),
           if (c.isMeter) param('中继保护板 MAC', s?['relay_mac']?.toString() ?? '--'),
@@ -1006,6 +1010,40 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
         ],
       ),
     ),
+    heading('设备版本与均衡参数 · 只读'),
+    box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      if (!c.isMeter) TextButton(
+        onPressed: c.state == LinkState.connected && !c.stale && !c.commandBusy && !c.detailsBusy ? () => authenticateBoard(level: 1) : null,
+        child: const Text('校验已有一级密码（用于只读参数）')),
+      if (!c.isMeter) OutlinedButton.icon(
+        onPressed: c.state == LinkState.connected && !c.stale && !c.commandBusy && !c.detailsBusy &&
+            (s?['permission'] as num? ?? 0) >= 1 ? () async {
+          try { await c.readDetails(); }
+          catch (error) {
+            if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+          }
+        } : null,
+        icon: const Icon(Icons.manage_search), label: Text(c.detailsBusy ? '读取中…' : '读取版本与均衡参数')),
+      if (c.isMeter) muted('蓝宝版本来自模块表2；不读取或修改保护板参数'),
+      if (!c.isMeter) ...['硬件版本', '软件版本', '电池编号'].map((name) => param(name, c.identity[name]?.isNotEmpty == true ? c.identity[name]! : '--')),
+      if (!c.isMeter) ...balanceParameterNames.entries.map((entry) => param(entry.value,
+          balanceParameterValue(entry.key, c.balanceParameters[entry.key]))),
+      if (c.detailsUpdated != null) muted('最后读取：${c.detailsUpdated!.toLocal()}'),
+      if (c.detailsResult != null) Text(c.detailsResult!),
+      if (!c.isMeter) muted('至少一级权限；仅读取指定非密码块，未取得的值显示 --'),
+    ])),
+    heading('均衡详情'),
+    box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      param('均衡状态', balanceText(s)),
+      if (activeBalance(s) != null) ...[
+        param('主动均衡串号', '${activeBalance(s)!['cell']}'),
+        param('主动均衡电流', '${activeBalance(s)!['current_a']} A'),
+        param('均衡线阻', '${activeBalance(s)!['resistance_mohm']} mΩ'),
+        param('均衡故障原始码', '${activeBalance(s)!['fault_raw']}'),
+      ] else if (s?['bms_type'] == 33) muted('类型33需扩展机型证据，本版保留原始值，不猜测主动均衡'),
+      if (s?['balance_raw'] != null) param('均衡原始值', '0x${(s!['balance_raw'] as num).toInt().toRadixString(16).padLeft(8, "0").toUpperCase()}'),
+      muted(c.stale ? '最后读数，当前状态未确认' : '主动均衡解析只对已确认的类型1/2开放'),
+    ])),
     heading('保护板控制'),
     box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       muted(c.state == LinkState.demo ? '模拟模式不发送控制命令'
@@ -1013,7 +1051,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
           : '需三级权限；无应答不自动重发，不更改保护阈值'),
       param('均衡状态', balanceText(s)),
       OutlinedButton.icon(
-        onPressed: !c.isMeter && c.state == LinkState.connected && !c.stale && !c.commandBusy ? authenticateBoard : null,
+        onPressed: !c.isMeter && c.state == LinkState.connected && !c.stale && !c.commandBusy && !c.detailsBusy ? authenticateBoard : null,
         icon: const Icon(Icons.lock_outline), label: const Text('校验已有三级密码')),
       Wrap(spacing: 8, children: [
         OutlinedButton(onPressed: c.canControl ? () => controlBoard(13, '开启均衡') : null, child: const Text('开启均衡')),
@@ -1069,7 +1107,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
       ),
     ),
     heading('关于应用'),
-    box(const Text('ANT BMS · v0.5.1\n电池监控、GPS 车速与充放电记录')),
+    box(const Text('ANT BMS · v0.6.0\n电池监控、GPS 车速与充放电记录')),
   ];
   Widget param(String label, String value) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 8),

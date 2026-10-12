@@ -11,6 +11,7 @@ import 'core.dart';
 import 'ble_channel.dart';
 import 'record_archive.dart';
 import 'device_protocol.dart';
+import 'bms_details.dart';
 
 import 'package:device_info_plus/device_info_plus.dart';
 
@@ -109,10 +110,18 @@ class BatteryController extends ChangeNotifier {
   final meter = LanbaoProtocol();
   final Map<String, dynamic> _meterMetadata = {};
   bool commandBusy = false;
+  bool detailsBusy = false;
+  final Map<String, String> identity = {};
+  final Map<int, int> balanceParameters = {};
+  DateTime? detailsUpdated;
+  String? detailsResult;
+  Completer<List<int>>? _detailsReply;
+  int? _detailAddress;
+  int _detailLength = 0;
   String? commandResult;
   Completer<int>? _commandReply;
   int? _expectedFunction, _expectedRegister;
-  bool get canControl => _foreground && !isMeter && !stale && !commandBusy &&
+  bool get canControl => _foreground && !isMeter && !stale && !commandBusy && !detailsBusy &&
       state == LinkState.connected && (snapshot?['permission'] as num? ?? 0) >= 3;
 
   void setMeterMatchCode(String code) {
@@ -123,7 +132,7 @@ class BatteryController extends ChangeNotifier {
   }
 
   Future<int> _transact(List<int> frame, int function, int register) async {
-    if (isMeter || state != LinkState.connected || stale || _write == null || commandBusy) {
+    if (isMeter || state != LinkState.connected || stale || _write == null || commandBusy || detailsBusy) {
       throw StateError('需要新鲜数据与真实 ANT 直连，且无其他命令执行中');
     }
     commandBusy = true;
@@ -157,18 +166,71 @@ class BatteryController extends ChangeNotifier {
     }
   }
 
-  Future<void> authenticate(String password) async {
-    final frame = antUserPermission(password);
+  Future<void> authenticate(String password, {int level = 3}) async {
+    final frame = antUserPermission(password, level: level);
     try {
-      final level = await _transact(frame, 0x43, 346);
-      if (level < 0) throw StateError('连接已中断');
-      if (snapshot != null) snapshot!['permission'] = level;
-      commandResult = level >= 3 ? '设备返回 $level 级权限' : '校验未达到三级权限（返回 $level 级）';
+      final returnedLevel = await _transact(frame, 0x43, 330 + (level - 1) * 8);
+      if (returnedLevel < 0) throw StateError('连接已中断');
+      if (snapshot != null) snapshot!['permission'] = returnedLevel;
+      commandResult = returnedLevel >= level ? '设备返回 $returnedLevel 级权限' : '校验未达到 $level 级权限（返回 $returnedLevel 级）';
       log(commandResult!); // Password and credential frame never enter logs.
     } catch (_) {
       commandResult = '权限校验未确认，请重新连接后重试';
     }
     if (!_disposed) notifyListeners();
+  }
+
+  Future<void> readDetails() async {
+    if (!_foreground || isMeter || state != LinkState.connected || stale || commandBusy || detailsBusy ||
+        (snapshot?['permission'] as num? ?? 0) < 1) {
+      throw StateError('真实 ANT 直连且至少一级权限才能读取设备信息');
+    }
+    detailsBusy = true;
+    detailsResult = '读取设备版本与均衡参数…';
+    final epoch = _epoch;
+    notifyListeners();
+    try {
+      final deadline = DateTime.now().add(const Duration(seconds: 4));
+      while (_writing && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+      }
+      if (_writing) throw StateError('读取通道忙');
+      for (final block in [(620, 16, '硬件版本'), (636, 16, '软件版本'),
+          (262, 32, '电池编号'), (140, 12, '均衡参数')]) {
+        if (epoch != _epoch || _write == null || !_foreground) throw StateError('连接已变化');
+        final reply = Completer<List<int>>();
+        _detailsReply = reply;
+        _detailAddress = block.$1;
+        _detailLength = block.$2;
+        await _write!.write(antReadParameter(block.$1, block.$2), withResponse: _writeWithResponse)
+            .timeout(const Duration(seconds: 3));
+        final data = await reply.future.timeout(const Duration(seconds: 2));
+        if (epoch != _epoch || data.length != block.$2) throw StateError('未取得完整参数块');
+        if (block.$1 == 140) {
+          for (var i = 0; i < data.length; i += 2) {
+            balanceParameters[140 + i] = data[i] | data[i + 1] << 8;
+          }
+        } else {
+          identity[block.$3] = parameterAscii(data);
+        }
+        detailsUpdated = DateTime.now();
+        log('读取 ${block.$3} 完成（${data.length} 字节）');
+        _detailsReply = null;
+        _detailAddress = null;
+      }
+      detailsResult = '已读取版本 / 编号 / 均衡参数（只读）';
+    } catch (_) {
+      detailsResult = '读取未完成，已取得的字段保留；请核对权限与固件。';
+      // Isolate late replies from a subsequent read of the same block.
+      if (epoch == _epoch) await disconnect();
+    } finally {
+      _detailsReply = null;
+      _detailAddress = null;
+      detailsBusy = false;
+      _requestAt = DateTime.now();
+      if (state == LinkState.connected) await refresh();
+      if (!_disposed) notifyListeners();
+    }
   }
 
   Future<void> control(int command) async {
@@ -311,6 +373,10 @@ class BatteryController extends ChangeNotifier {
   Future<void> connect(DiscoveredDevice d, {String? meterCode}) async {
     await disconnect();
     if (_disposed) return;
+    identity.clear();
+    balanceParameters.clear();
+    detailsUpdated = null;
+    detailsResult = null;
     snapshot = null;
     updated = null;
     deviceId = d.id;
@@ -449,7 +515,7 @@ class BatteryController extends ChangeNotifier {
       if (_foreground && epoch == _epoch) {
         _send();
         final responseTimeout = state == LinkState.connected ? 5 : 10;
-        if (!commandBusy && _requestAt != null &&
+        if (!commandBusy && !detailsBusy && _requestAt != null &&
             DateTime.now().difference(_requestAt!).inSeconds >= responseTimeout) {
           _failed('$responseTimeout 秒内未收到有效实时应答（请求 $requestsSent，通知 $notificationCount，有效帧 $validFrames）');
         }
@@ -460,7 +526,7 @@ class BatteryController extends ChangeNotifier {
 
   bool _writeWithResponse = false;
   Future<void> _send() async {
-    if (_writing || commandBusy || _write == null || (!isMeter && core == null)) return;
+    if (_writing || commandBusy || detailsBusy || _write == null || (!isMeter && core == null)) return;
     _writing = true;
     final epoch = _epoch;
     final characteristic = _write!;
@@ -533,6 +599,11 @@ class BatteryController extends ChangeNotifier {
       } else if (event['type'] == 'segment') {
         final segment = event['data'] as Map;
         final data = List<int>.from(segment['data'] as List);
+        if (segment['address'] == 0xa1 && segment['function'] == 0x12 &&
+            segment['register'] == _detailAddress && data.length == _detailLength &&
+            _detailsReply != null && !_detailsReply!.isCompleted) {
+          _detailsReply!.complete(data);
+        }
         if (segment['address'] == 0xa1 && segment['function'] == _expectedFunction &&
             segment['register'] == _expectedRegister && data.length >= 2 &&
             _commandReply != null && !_commandReply!.isCompleted) {
@@ -554,6 +625,7 @@ class BatteryController extends ChangeNotifier {
       return;
     ++_epoch;
     if (_commandReply != null && !_commandReply!.isCompleted) _commandReply!.complete(-1);
+    if (_detailsReply != null && !_detailsReply!.isCompleted) _detailsReply!.complete([]);
     _poll?.cancel();
     _connection?.cancel();
     _notifications?.cancel();
@@ -584,6 +656,7 @@ class BatteryController extends ChangeNotifier {
     log('断开连接 / 停止扫描与重连');
     ++_epoch;
     if (_commandReply != null && !_commandReply!.isCompleted) _commandReply!.complete(-1);
+    if (_detailsReply != null && !_detailsReply!.isCompleted) _detailsReply!.complete([]);
     _scanTimer?.cancel();
     _poll?.cancel();
     _reconnectTimer?.cancel();
@@ -613,6 +686,10 @@ class BatteryController extends ChangeNotifier {
   Future<void> demo() async {
     await disconnect();
     if (_disposed) return;
+    identity.clear();
+    balanceParameters.clear();
+    detailsUpdated = null;
+    detailsResult = null;
     error = null;
     if (core == null) { error = startupError; notifyListeners(); return; }
     family = DeviceFamily.ant;

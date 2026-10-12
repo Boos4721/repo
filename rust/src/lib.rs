@@ -177,6 +177,10 @@ pub struct Snapshot {
     pub cycle_ah: f64,
     pub power_w: i32,
     pub runtime_s: u32,
+    pub total_discharge_ah: f64,
+    pub total_charge_ah: f64,
+    pub total_discharge_s: Option<u32>,
+    pub total_charge_s: Option<u32>,
     pub balance_raw: u32,
     pub max_cell_v: f64,
     pub max_cell_index: u16,
@@ -201,10 +205,10 @@ pub fn decode(data: &[u8]) -> Result<Snapshot, String> {
     let n = data[3] as usize;
     let m = data[2] as usize;
     let t = 28 + 2 * n + 2 * m;
-    if n == 0 || data.len() < t + 78 {
+    if n == 0 || data.len() < t + 70 {
         return Err(format!(
             "invalid cell count or truncated core: need {}, got {}",
-            t + 78,
+            t + 70,
             data.len()
         ));
     }
@@ -256,6 +260,10 @@ pub fn decode(data: &[u8]) -> Result<Snapshot, String> {
         cycle_ah: u32at(t + 24) as f64 / 1000.,
         power_w: u32at(t + 28) as i32,
         runtime_s: u32at(t + 32),
+        total_discharge_ah: u32at(t + 62) as f64 / 1000.,
+        total_charge_ah: u32at(t + 66) as f64 / 1000.,
+        total_discharge_s: opt32(t + 70),
+        total_charge_s: opt32(t + 74),
         balance_raw: u32at(t + 36),
         max_cell_v: u16at(t + 40) as f64 / 1000.,
         max_cell_index: u16at(t + 42),

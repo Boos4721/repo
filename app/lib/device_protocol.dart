@@ -32,11 +32,21 @@ List<int> antFrame(int function, int register, List<int> payload) {
   return [...frame, crc & 255, crc >> 8, 0xaa, 0x55];
 }
 
-List<int> antUserPermission(String password) {
-  if (!RegExp(r'^[\x20-\x7e]{8}$').hasMatch(password)) {
-    throw const FormatException('请输入已有的三级权限密码（8 位 ASCII），不是设置新密码');
+List<int> antReadParameter(int address, int length) {
+  if (!{140: 12, 620: 16, 636: 16, 262: 32}.entries.any((entry) => entry.key == address && entry.value == length)) {
+    throw ArgumentError('Only documented non-secret blocks can be read');
   }
-  return antFrame(0x23, 346, password.codeUnits);
+  final frame = [0x7e, 0xa1, 0x02, address & 255, address >> 8, length];
+  final crc = protocolCrc(frame.sublist(1));
+  return [...frame, crc & 255, crc >> 8, 0xaa, 0x55];
+}
+
+List<int> antUserPermission(String password, {int level = 3}) {
+  if (![1, 2, 3].contains(level)) throw ArgumentError('Unsupported permission level');
+  if (!RegExp(r'^[\x20-\x7e]{8}$').hasMatch(password)) {
+    throw const FormatException('请输入已有的权限密码（8 位 ASCII），不是设置新密码');
+  }
+  return antFrame(0x23, 330 + (level - 1) * 8, password.codeUnits);
 }
 
 String balanceText(Map<String, dynamic>? snapshot) {

@@ -13,3 +13,6 @@
 v0.5 的蓝宝帧、CRC、表字段/换算、设备识别与均衡/重启命令参考同一提交的
 LanBaoProtocol.kt、DeviceFamily.kt、BmsTransport.kt、Params.kt 与 docs/07、09、13。
 蓝宝报文回归为合成向量，均衡/重启的上游文档也未声明在用户设备上实测。
+
+v0.6 保护/告警字典及主动均衡结构参考 BitDict.kt、docs/05，
+均衡参数与版本只读块参考 Params.kt、BmsRepository.kt；均保留原 MIT 许可。

@@ -95,12 +95,14 @@ fn session_reset_discards_partial() {
 fn truncation_and_unknown_bits() {
     let frames = Parser::default().feed(&real());
     let mut data = frames[0].data.clone();
-    for len in 0..154 {
+    for len in 0..146 {
         assert!(decode(&data[..len]).is_err());
     }
-    data.truncate(154);
+    data.truncate(146);
     let s = decode(&data).unwrap();
     assert_eq!(s.charge_time_s, None);
+    assert_eq!(s.total_discharge_s, None);
+    assert_eq!(s.total_charge_s, None);
     assert_eq!(s.warning_bits, "0000000005800001");
 }
 #[test]
@@ -114,6 +116,26 @@ fn signed_fields_flags() {
     assert_eq!(s.cells[0].flags, 7);
     assert_eq!(s.temperatures_c[0], -40);
     assert_eq!(s.current_a, -12.);
+}
+
+#[test]
+fn shorter_core_preserves_statistics_and_optional_times() {
+    let mut data = Parser::default().feed(&real())[0].data.clone();
+    let t = 28 + 2 * data[3] as usize + 2 * data[2] as usize;
+    data[t + 62..t + 66].copy_from_slice(&123456u32.to_le_bytes());
+    data[t + 66..t + 70].copy_from_slice(&987654u32.to_le_bytes());
+    data[t + 70..t + 74].copy_from_slice(&90061u32.to_le_bytes());
+    data.truncate(t + 74);
+    let s = decode(&data).unwrap();
+    assert_eq!(s.total_discharge_ah, 123.456);
+    assert_eq!(s.total_charge_ah, 987.654);
+    assert_eq!(s.total_discharge_s, Some(90061));
+    assert_eq!(s.total_charge_s, None);
+    assert_eq!(s.charge_time_s, None);
+    data.truncate(t + 70);
+    let short_frame = build(0xa1, 0x11, 0, 0, &data).unwrap();
+    let event = Engine::default().feed(&short_frame);
+    assert_eq!(event["events"][0]["type"], "snapshot");
 }
 #[test]
 fn coalesced_packets() {
