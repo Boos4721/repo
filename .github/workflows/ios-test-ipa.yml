@@ -1,0 +1,52 @@
+name: Build iOS Test IPA
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, ant-bms-ios-test]
+    paths:
+      - 'app/**'
+      - 'rust/**'
+      - 'scripts/**'
+      - '.github/workflows/ios-test-ipa.yml'
+permissions:
+  contents: read
+concurrency:
+  group: ios-test-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  ipa:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      IPHONEOS_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Verify protocol
+        run: cargo +stable test --manifest-path rust/Cargo.toml --locked
+      - name: Generate platform shells and resolve dependencies
+        run: bash scripts/bootstrap.sh
+      - name: Build and link Rust iOS libraries
+        run: bash scripts/build_ios_rust.sh
+      - name: Check Dart and Flutter source
+        working-directory: app
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+      - name: Check presentation rules
+        working-directory: tools
+        run: |
+          dart pub get
+          dart run profile_smoke.dart
+      - name: Compile and package unsigned IPA
+        run: bash scripts/package_ios_unsigned.sh
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ANT-BMS-iOS-unsigned-${{ github.run_number }}
+          path: dist/ANT-BMS-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14

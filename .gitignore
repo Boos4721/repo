@@ -1,0 +1,12 @@
+rust/target/
+.dart_tool/
+build/
+app/android/app/src/main/jniLibs/
+app/ios/Rust/
+app/ios/Flutter/Generated.xcconfig
+app/ios/Flutter/flutter_export_environment.sh
+*.jks
+*.keystore
+*.mobileprovision
+
+dist/
