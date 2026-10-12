@@ -8,6 +8,7 @@ import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'core.dart';
+import 'ble_channel.dart';
 import 'record_archive.dart';
 
 import 'package:device_info_plus/device_info_plus.dart';
@@ -110,7 +111,7 @@ class BatteryController extends ChangeNotifier {
   StreamSubscription<DiscoveredDevice>? _scan;
   StreamSubscription<ConnectionStateUpdate>? _connection;
   StreamSubscription<List<int>>? _notifications;
-  QualifiedCharacteristic? _write;
+  Characteristic? _write;
   DateTime? _requestAt;
   bool get stale =>
       updated == null ||
@@ -199,7 +200,8 @@ class BatteryController extends ChangeNotifier {
               try {
                 await _subscribe(id, epoch);
               } catch (e) {
-                if (epoch == _epoch) _failed('蓝牙通道失败：$e');
+                if (epoch == _epoch)
+                  _failed('蓝牙通道失败：${e is StateError ? e.message : e}');
               }
             }
             if (event.connectionState == DeviceConnectionState.disconnected) {
@@ -213,49 +215,75 @@ class BatteryController extends ChangeNotifier {
   }
 
   Future<void> _subscribe(String id, int epoch) async {
-    final services = await ble.discoverServices(id);
-    if (epoch != _epoch) return;
     final pair = switch (channel) {
       Channel.standard => ('FFE1', 'FFE1'),
       Channel.auxiliaryA => ('FFF3', 'FFF4'),
       Channel.auxiliaryB => ('FFF5', 'FFF6'),
     };
-    final service = services
-        .where((s) => s.serviceId == uuid('FFE0'))
-        .firstOrNull;
-    if (service == null) throw StateError('未找到 FFE0 服务');
-    final writer = service.characteristics
-        .where((c) => c.characteristicId == uuid(pair.$1))
-        .firstOrNull;
-    final reader = service.characteristics
-        .where((c) => c.characteristicId == uuid(pair.$2))
-        .firstOrNull;
-    if (writer == null ||
-        reader == null ||
-        (!writer.isWritableWithoutResponse && !writer.isWritableWithResponse) ||
-        (!reader.isNotifiable && !reader.isIndicatable))
-      throw StateError('设备不支持当前通道');
-    _write = QualifiedCharacteristic(
-      deviceId: id,
-      serviceId: service.serviceId,
-      characteristicId: writer.characteristicId,
-    );
-    _writeWithResponse = writer.isWritableWithResponse;
-    final read = QualifiedCharacteristic(
-      deviceId: id,
-      serviceId: service.serviceId,
-      characteristicId: reader.characteristicId,
-    );
-    _notifications = ble
-        .subscribeToCharacteristic(read)
-        .listen(
-          (bytes) {
-            if (epoch == _epoch) _accept(bytes);
-          },
-          onError: (Object e) {
-            if (epoch == _epoch) _failed('订阅失败：$e');
-          },
+    List<Service> services = [];
+    BleChannelMatch? match;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (epoch != _epoch || _disposed) return;
+      await ble.discoverAllServices(id).timeout(const Duration(seconds: 8));
+      if (epoch != _epoch || _disposed) return;
+      services = await ble
+          .getDiscoveredServices(id)
+          .timeout(const Duration(seconds: 8));
+      if (epoch != _epoch || _disposed) return;
+      log('服务发现 ${attempt + 1}/3：${services.length} 个服务');
+      for (final service in services) {
+        log(
+          '服务 ${service.id} · ${service.characteristics.map((c) => '${c.id}[W=${c.isWritableWithResponse}/${c.isWritableWithoutResponse},N=${c.isNotifiable}/${c.isIndicatable}]').join(', ')}',
         );
+      }
+      match = matchBleChannel(
+        services
+            .map(
+              (service) => BleServiceInfo(
+                service.id.toString(),
+                service.characteristics
+                    .map(
+                      (c) => BleCharacteristicInfo(
+                        c.id.toString(),
+                        writable:
+                            c.isWritableWithResponse ||
+                            c.isWritableWithoutResponse,
+                        notifiable: c.isNotifiable || c.isIndicatable,
+                      ),
+                    )
+                    .toList(),
+              ),
+            )
+            .toList(),
+        pair.$1,
+        pair.$2,
+      );
+      if (match != null) break;
+      if (attempt < 2)
+        await Future<void>.delayed(Duration(milliseconds: 350 * (attempt + 1)));
+    }
+    if (match == null)
+      throw StateError(
+        '未找到可用的 ANT 数据通道；实际服务：${services.map((s) => s.id).join(', ')}。请靠近电池重试，或分享诊断日志。',
+      );
+    final service = services[match.serviceIndex];
+    final writer = service.characteristics[match.writeIndex];
+    final reader = service.characteristics[match.notifyIndex];
+    if (!match.standardService)
+      log('FFE0 未匹配，使用实际服务 ${service.id} 中的已知 ANT 特征对');
+    _write = writer;
+    _writeWithResponse = writer.isWritableWithResponse;
+    log('通道就绪：服务 ${service.id} / 写入 ${writer.id} / 通知 ${reader.id}');
+    _notifications = reader.subscribe().listen(
+      (bytes) {
+        if (epoch != _epoch || _disposed) return;
+        if (snapshot == null) log('收到蓝牙通知：${bytes.length} 字节');
+        _accept(bytes);
+      },
+      onError: (Object e) {
+        if (epoch == _epoch) _failed('订阅失败：$e');
+      },
+    );
     // GATT registration is async. Repeat the short read probe until a valid response arrives.
     await Future<void>.delayed(const Duration(milliseconds: 250));
     if (epoch != _epoch) return;
@@ -280,14 +308,9 @@ class BatteryController extends ChangeNotifier {
     final characteristic = _write!;
     try {
       final bytes = core!.request();
-      if (_writeWithResponse) {
-        await ble.writeCharacteristicWithResponse(characteristic, value: bytes);
-      } else {
-        await ble.writeCharacteristicWithoutResponse(
-          characteristic,
-          value: bytes,
-        );
-      }
+      await characteristic
+          .write(bytes, withResponse: _writeWithResponse)
+          .timeout(const Duration(seconds: 3));
     } catch (e) {
       if (epoch == _epoch) _failed('读取请求发送失败：$e');
     } finally {

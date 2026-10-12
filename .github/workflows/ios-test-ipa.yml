@@ -43,6 +43,7 @@ jobs:
           dart pub get
           dart run profile_smoke.dart
           dart run archive_smoke.dart
+          dart run ble_channel_smoke.dart
       - name: Compile and package unsigned IPA
         run: bash scripts/package_ios_unsigned.sh
       - name: Upload IPA
