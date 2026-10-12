@@ -9,7 +9,7 @@ bundle="$project_root/app/build/ios/iphoneos/Runner.app"
 [[ -d "$bundle" ]] || { echo 'Runner.app missing; no IPA generated'; exit 1; }
 executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Info.plist")"
 [[ -f "$bundle/$executable" ]] || { echo 'App executable missing'; exit 1; }
-xcrun lipo -verify_arch arm64 "$bundle/$executable"
+xcrun lipo "$bundle/$executable" -verify_arch arm64
 python3 "$project_root/scripts/verify_ios_symbols.py" "$bundle/$executable"
 mkdir -p "$project_root/dist"
 staging="$(mktemp -d "$project_root/dist/ipa-stage.XXXXXX")"
@@ -23,3 +23,4 @@ rm -f "$archive"
 unzip -tq "$archive"
 printf 'Unsigned IPA generated: %s\n' "$archive"
 printf 'This package must be signed before installing on an iPhone.\n'
+
