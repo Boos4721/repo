@@ -7,6 +7,7 @@ import 'package:share_plus/share_plus.dart';
 
 import 'battery_controller.dart';
 import 'device_profile.dart';
+import 'gps_controller.dart';
 
 void main() => runApp(const AntApp());
 
@@ -45,6 +46,7 @@ class BatteryHome extends StatefulWidget {
 
 class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
   final c = BatteryController();
+  final gps = GpsController();
   int page = 0;
   String trendKey = 'current_a';
   String? selectedSession;
@@ -53,6 +55,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     c.addListener(changed);
+    gps.addListener(changed);
   }
 
   void changed() {
@@ -60,13 +63,20 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) =>
-      c.foreground(state == AppLifecycleState.resumed);
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    c.foreground(state == AppLifecycleState.resumed);
+    // Permission dialogs briefly mark iOS inactive; do not cancel their request.
+    if (state == AppLifecycleState.resumed) gps.foreground(true);
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached) gps.foreground(false);
+  }
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     c.removeListener(changed);
     c.dispose();
+    gps.removeListener(changed);
+    gps.dispose();
     super.dispose();
   }
 
@@ -195,10 +205,14 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                 OutlinedButton.icon(
                   onPressed: () {
                     Navigator.pop(ctx);
-                    c.demo();
+                    if (c.state == LinkState.demo) {
+                      c.disconnect();
+                    } else {
+                      c.demo();
+                    }
                   },
-                  icon: const Icon(Icons.science_outlined),
-                  label: const Text('体验模拟电池'),
+                  icon: Icon(c.state == LinkState.demo ? Icons.link_off : Icons.science_outlined),
+                  label: Text(c.state == LinkState.demo ? '断开模拟连接' : '体验模拟电池'),
                 ),
               ],
             ),
@@ -296,6 +310,21 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
             _ => '未知状态',
           };
     return [
+      box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.speed),
+          const SizedBox(width: 8),
+          const Expanded(child: Text('GPS 车速')),
+          Switch(value: gps.enabled, onChanged: gps.busy ? null : (value) {
+            if (value) { gps.start(); } else { gps.stop(); }
+          }),
+        ]),
+        Text('${gps.speedKmh?.toStringAsFixed(1) ?? '--'} km/h',
+            style: const TextStyle(fontSize: 38, fontWeight: FontWeight.w600)),
+        muted(gps.detail),
+        muted('独立于 BMS / 控制器 · 仅前台定位 · 不保存位置'),
+      ])),
+      const SizedBox(height: 14),
       Padding(
         padding: const EdgeInsets.only(bottom: 14),
         child: Row(
@@ -831,44 +860,6 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
           muted(c.deviceId ?? '未选择真实设备'),
           const SizedBox(height: 8),
           Text('$connection · ${permissionText(s?['permission'] as num?)}'),
-          const SizedBox(height: 8),
-          muted(
-            DeviceProfile.target.match(
-              c.deviceName,
-              demo: c.state == LinkState.demo,
-            ),
-          ),
-        ],
-      ),
-    ),
-    heading('适配档案 · 来自截图'),
-    box(
-      Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'ANT@BLE24CBUB-5P4P',
-            style: TextStyle(fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 8),
-          muted('目标 21 串 / 170Ah · 三元锂'),
-          const SizedBox(height: 8),
-          const SelectableText('截图版本：\n24ZHE6TB420A / 24CBUB00-241008A'),
-          const SizedBox(height: 8),
-          muted('尚未从真实设备读取固件，不能据此判定兼容。'),
-          ...DeviceProfile.target
-              .differences(s)
-              .map(
-                (message) => Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(
-                    message,
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.error,
-                    ),
-                  ),
-                ),
-              ),
         ],
       ),
     ),
@@ -934,8 +925,9 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
           ),
           ListTile(
             contentPadding: EdgeInsets.zero,
-            title: const Text('断开连接'),
-            onTap: () => c.disconnect(),
+            title: Text(c.state == LinkState.demo ? '断开模拟连接' : '断开连接'),
+            subtitle: c.state == LinkState.demo ? const Text('停止模拟并清除实时演示数据，保留历史记录') : null,
+            onTap: c.state == LinkState.idle ? null : () => c.disconnect(),
           ),
         ],
       ),
@@ -957,6 +949,14 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
       Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          param('蓝牙状态', c.ble.status.name),
+          Text('连接阶段：${c.diagnosticStage}'),
+          const SizedBox(height: 8),
+          param('读取请求', '${c.requestsSent}'),
+          param('通知 / 字节', '${c.notificationCount} / ${c.receivedBytes}'),
+          param('有效帧 / 解析错误', '${c.validFrames} / ${c.parseErrors}'),
+          if (c.lastFailure != null) Text('最近失败：${c.lastFailure}'),
+          if (c.state == LinkState.demo) muted('当前为模拟连接，计数不表示真实蓝牙通信'),
           param(
             '最后更新',
             c.updated?.toLocal().toString().substring(11, 19) ?? '--',
@@ -968,8 +968,14 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
             label: const Text('立即刷新'),
           ),
           TextButton.icon(
+            onPressed: c.deviceId != null && (c.state == LinkState.idle || c.state == LinkState.lost)
+                ? c.retryConnection : null,
+            icon: const Icon(Icons.bluetooth_connected),
+            label: const Text('重新连接'),
+          ),
+          TextButton.icon(
             onPressed: () =>
-                SharePlus.instance.share(ShareParams(text: c.logs.join('\n'))),
+                SharePlus.instance.share(ShareParams(text: c.diagnosticReport)),
             icon: const Icon(Icons.ios_share),
             label: const Text('分享诊断日志'),
           ),
@@ -985,14 +991,14 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
       ),
     ),
     heading('关于应用'),
-    box(const Text('ANT BMS · v0.4.1\n电池监控与充放电记录')),
+    box(const Text('ANT BMS · v0.4.2\n电池监控、GPS 车速与充放电记录')),
   ];
   Widget param(String label, String value) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 8),
     child: Row(
       children: [
         Expanded(child: Text(label)),
-        Text(value),
+        Flexible(child: Text(value, textAlign: TextAlign.end)),
       ],
     ),
   );

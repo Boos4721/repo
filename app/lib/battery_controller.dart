@@ -103,6 +103,43 @@ class BatteryController extends ChangeNotifier {
   String? deviceId;
   String deviceName = '尚未选择电池';
   String? error;
+  String diagnosticStage = '未连接';
+  String? lastFailure;
+  int requestsSent = 0, notificationCount = 0, receivedBytes = 0,
+      validFrames = 0, parseErrors = 0;
+  DateTime? lastNotification;
+
+  void _resetDiagnostics() {
+    requestsSent = notificationCount = receivedBytes = validFrames = parseErrors = 0;
+    lastNotification = null;
+    lastFailure = null;
+  }
+
+  String get diagnosticReport => [
+    'ANT BMS 连接诊断',
+    '时间：${DateTime.now().toIso8601String()}',
+    '设备：$deviceName · ${deviceId ?? "无真实设备"}',
+    '状态：${state.name} · 阶段：$diagnosticStage · 蓝牙：${ble.status.name}',
+    '通道：${channel.name} · 重试：$_retries/3',
+    '读取请求：$requestsSent · 通知：$notificationCount · 字节：$receivedBytes',
+    '有效帧：$validFrames · 解析错误：$parseErrors',
+    '最后通知：${lastNotification?.toIso8601String() ?? "--"}',
+    '最后有效数据：${updated?.toIso8601String() ?? "--"}',
+    '最近失败：${lastFailure ?? "无"}',
+    '--- 日志（可能包含设备标识，分享前请检查）---',
+    ...logs,
+  ].join('\n');
+
+  Future<void> retryConnection() async {
+    final id = deviceId;
+    if (id == null || state == LinkState.demo) return;
+    await disconnect();
+    if (_disposed) return;
+    _retries = 0;
+    error = null;
+    _resetDiagnostics();
+    await _connect();
+  }
   final Map<String, DiscoveredDevice> devices = {};
   final List<Map<String, dynamic>> samples = [];
   bool recording = false, _writing = false, _foreground = true;
@@ -132,6 +169,8 @@ class BatteryController extends ChangeNotifier {
       if (scanEpoch != _epoch || _disposed) return;
       if (result.values.any((status) => !status.isGranted)) {
         error = sdk >= 31 ? '需要允许“附近的设备”权限。' : 'Android 11 及以下扫描蓝牙需要定位权限。';
+        diagnosticStage = '蓝牙扫描权限不足';
+        lastFailure = error;
         log(error!);
         notifyListeners();
         return;
@@ -139,6 +178,7 @@ class BatteryController extends ChangeNotifier {
     }
     if (scanEpoch != _epoch) return;
     devices.clear();
+    diagnosticStage = '扫描附近设备';
     log('开始扫描 ANT 设备');
     state = LinkState.scanning;
     notifyListeners();
@@ -154,6 +194,9 @@ class BatteryController extends ChangeNotifier {
           onError: (Object e) {
             if (scanEpoch != _epoch) return;
             error = '扫描失败：$e';
+            lastFailure = error;
+            diagnosticStage = '扫描失败';
+            log(error!);
             state = LinkState.idle;
             notifyListeners();
           },
@@ -161,6 +204,9 @@ class BatteryController extends ChangeNotifier {
     _scanTimer = Timer(const Duration(seconds: 10), () {
       _scan?.cancel();
       if (scanEpoch == _epoch && state == LinkState.scanning) {
+        diagnosticStage = '扫描完成：${devices.length} 台 ANT 设备';
+        log(diagnosticStage);
+        if (devices.isEmpty) error = '未发现 ANT 设备：请确认蓝牙已开启、电池可发现，且未被其他 App 占用。';
         state = LinkState.idle;
         notifyListeners();
       }
@@ -175,12 +221,15 @@ class BatteryController extends ChangeNotifier {
     deviceId = d.id;
     deviceName = d.name.isEmpty ? 'ANT BMS' : d.name;
     _retries = 0;
+    _resetDiagnostics();
     await _connect();
   }
 
   Future<void> _connect() async {
     if (core == null) {
       error = startupError;
+      diagnosticStage = '协议核心不可用';
+      lastFailure = error;
       notifyListeners();
       return;
     }
@@ -188,6 +237,7 @@ class BatteryController extends ChangeNotifier {
     if (id == null) return;
     final epoch = ++_epoch;
     core!.reset();
+    diagnosticStage = '建立蓝牙连接';
     log('连接 $id · 通道 ${channel.name} · 尝试 ${_retries + 1}');
     state = _retries > 0 ? LinkState.reconnecting : LinkState.connecting;
     notifyListeners();
@@ -197,6 +247,8 @@ class BatteryController extends ChangeNotifier {
           (event) async {
             if (epoch != _epoch) return;
             if (event.connectionState == DeviceConnectionState.connected) {
+              diagnosticStage = '发现服务与特征';
+              log('蓝牙链路已连接，等待协议数据');
               try {
                 await _subscribe(id, epoch);
               } catch (e) {
@@ -272,11 +324,15 @@ class BatteryController extends ChangeNotifier {
     if (!match.standardService)
       log('FFE0 未匹配，使用实际服务 ${service.id} 中的已知 ANT 特征对');
     _write = writer;
+    diagnosticStage = '订阅通知 / 等待有效应答';
     _writeWithResponse = writer.isWritableWithResponse;
     log('通道就绪：服务 ${service.id} / 写入 ${writer.id} / 通知 ${reader.id}');
     _notifications = reader.subscribe().listen(
       (bytes) {
         if (epoch != _epoch || _disposed) return;
+        notificationCount++;
+        receivedBytes += bytes.length;
+        lastNotification = DateTime.now();
         if (snapshot == null) log('收到蓝牙通知：${bytes.length} 字节');
         _accept(bytes);
       },
@@ -311,6 +367,7 @@ class BatteryController extends ChangeNotifier {
       await characteristic
           .write(bytes, withResponse: _writeWithResponse)
           .timeout(const Duration(seconds: 3));
+      if (epoch == _epoch) requestsSent++;
     } catch (e) {
       if (epoch == _epoch) _failed('读取请求发送失败：$e');
     } finally {
@@ -324,6 +381,11 @@ class BatteryController extends ChangeNotifier {
     for (final raw in result['events'] as List) {
       final event = raw as Map;
       if (event['type'] == 'snapshot' && event['address'] == 0xa1) {
+        validFrames++;
+        if (state != LinkState.demo && state != LinkState.connected) {
+          log('收到首个有效实时帧，连接确认成功');
+        }
+        diagnosticStage = state == LinkState.demo ? '模拟数据（非真实蓝牙）' : '实时数据就绪';
         snapshot = Map<String, dynamic>.from(event['data'] as Map);
         updated = DateTime.now();
         _requestAt = updated;
@@ -350,7 +412,9 @@ class BatteryController extends ChangeNotifier {
           });
         }
       } else if (event['type'] == 'error') {
+        parseErrors++;
         error = event['message'].toString();
+        if (parseErrors <= 5 || parseErrors % 20 == 0) log('解析错误 #$parseErrors：$error');
       }
     }
     notifyListeners();
@@ -370,20 +434,26 @@ class BatteryController extends ChangeNotifier {
     _requestAt = null;
     core?.reset();
     error = message;
+    lastFailure = message;
     log(message);
     if (_foreground && deviceId != null && _retries < 3) {
       _retries++;
       state = LinkState.reconnecting;
+      diagnosticStage = '等待重连（第 $_retries/3 次，${1 << _retries} 秒）';
+      log(diagnosticStage);
       _reconnectTimer = Timer(Duration(seconds: 1 << _retries), () {
         _connect();
       });
     } else {
       state = LinkState.lost;
+      diagnosticStage = '连接失败，请检查后手动重试';
     }
     notifyListeners();
   }
 
   Future<void> disconnect() async {
+    final wasDemo = state == LinkState.demo;
+    log(wasDemo ? '用户断开模拟连接，清除模拟实时数据' : '断开连接 / 停止扫描与重连');
     ++_epoch;
     _scanTimer?.cancel();
     _poll?.cancel();
@@ -396,6 +466,14 @@ class BatteryController extends ChangeNotifier {
     _requestAt = null;
     core?.reset();
     state = LinkState.idle;
+    diagnosticStage = '已断开';
+    error = null;
+    if (wasDemo) {
+      snapshot = null;
+      updated = null;
+      deviceId = null;
+      deviceName = '尚未选择电池';
+    }
     recording = false;
     await persist();
     if (!_disposed) notifyListeners();
@@ -411,13 +489,18 @@ class BatteryController extends ChangeNotifier {
       return;
     }
     deviceName = 'ANT@BLE24CBUB-5P4P · 演示';
+    _resetDiagnostics();
+    log('启动模拟连接：数据仅供演示');
     deviceId = null;
     snapshot = null;
     updated = null;
     state = LinkState.demo;
+    final demoEpoch = _epoch;
     _accept(core!.demo());
     _poll = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (_foreground) _accept(core!.demo());
+      if (!_disposed && _foreground && demoEpoch == _epoch && state == LinkState.demo) {
+        _accept(core!.demo());
+      }
     });
   }
 
