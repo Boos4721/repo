@@ -10,6 +10,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'core.dart';
 import 'ble_channel.dart';
 import 'record_archive.dart';
+import 'device_protocol.dart';
 
 import 'package:device_info_plus/device_info_plus.dart';
 
@@ -103,6 +104,99 @@ class BatteryController extends ChangeNotifier {
   String? deviceId;
   String deviceName = '尚未选择电池';
   String? error;
+  DeviceFamily family = DeviceFamily.ant;
+  bool get isMeter => family == DeviceFamily.lanbao;
+  final meter = LanbaoProtocol();
+  final Map<String, dynamic> _meterMetadata = {};
+  bool commandBusy = false;
+  String? commandResult;
+  Completer<int>? _commandReply;
+  int? _expectedFunction, _expectedRegister;
+  bool get canControl => _foreground && !isMeter && !stale && !commandBusy &&
+      state == LinkState.connected && (snapshot?['permission'] as num? ?? 0) >= 3;
+
+  void setMeterMatchCode(String code) {
+    if (state != LinkState.idle && state != LinkState.lost) {
+      throw StateError('请断开设备后修改匹配码');
+    }
+    meter.setMatchCode(code);
+  }
+
+  Future<int> _transact(List<int> frame, int function, int register) async {
+    if (isMeter || state != LinkState.connected || stale || _write == null || commandBusy) {
+      throw StateError('需要新鲜数据与真实 ANT 直连，且无其他命令执行中');
+    }
+    commandBusy = true;
+    commandResult = '等待设备应答…';
+    final reply = Completer<int>();
+    _commandReply = reply;
+    _expectedFunction = function;
+    _expectedRegister = register;
+    final epoch = _epoch;
+    notifyListeners();
+    try {
+      // Wait for any in-flight read before sending a single, never retried command.
+      final deadline = DateTime.now().add(const Duration(seconds: 4));
+      while (_writing && DateTime.now().isBefore(deadline)) {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+      }
+      if (_writing || epoch != _epoch || _write == null || !_foreground) throw StateError('连接已变化或读取忙');
+      await _write!.write(frame, withResponse: _writeWithResponse)
+          .timeout(const Duration(seconds: 3));
+      return await reply.future.timeout(const Duration(seconds: 5));
+    } catch (_) {
+      // A delayed reply must not be misattributed to a subsequent identical command.
+      if (epoch == _epoch) await disconnect();
+      rethrow;
+    } finally {
+      _commandReply = null;
+      _expectedFunction = _expectedRegister = null;
+      commandBusy = false;
+      _requestAt = DateTime.now();
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  Future<void> authenticate(String password) async {
+    final frame = antUserPermission(password);
+    try {
+      final level = await _transact(frame, 0x43, 346);
+      if (level < 0) throw StateError('连接已中断');
+      if (snapshot != null) snapshot!['permission'] = level;
+      commandResult = level >= 3 ? '设备返回 $level 级权限' : '校验未达到三级权限（返回 $level 级）';
+      log(commandResult!); // Password and credential frame never enter logs.
+    } catch (_) {
+      commandResult = '权限校验未确认，请重新连接后重试';
+    }
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> control(int command) async {
+    if (!canControl) throw StateError('直连保护板并获得三级权限后才能控制');
+    if (command == 9 && ((snapshot?['current_a'] as num? ?? 999).abs() > 0.5 ||
+        ![1, 3].contains(snapshot?['state']))) {
+      throw StateError('仅允许无充放电负载时重启');
+    }
+    final frame = antCommand(command);
+    try {
+      log('控制请求：$command（不自动重发）');
+      final code = await _transact(frame, 0x61, command);
+      const results = {0: '无确认结果', 1: '设备已接受', 2: '失败', 3: '权限不足',
+        4: '地址超限', 5: '电池类型错误', 6: '电池信息错误', 7: '固件不匹配'};
+      commandResult = '命令 $command：${results[code] ?? "未知结果 $code"}';
+      if (code == 1 && command != 9) {
+        commandResult = '$commandResult；实际均衡状态以实时回读为准';
+        await refresh();
+      }
+      if (code == 1 && command == 9) {
+        commandResult = '$commandResult；连接可能中断，请重新连接核对运行时间';
+      }
+    } catch (_) {
+      commandResult = '命令结果未确认：可能已执行，勿连续重发；请重新连接核对';
+    }
+    log(commandResult!);
+    if (!_disposed) notifyListeners();
+  }
   String diagnosticStage = '未连接';
   String? lastFailure;
   int requestsSent = 0, notificationCount = 0, receivedBytes = 0,
@@ -144,6 +238,7 @@ class BatteryController extends ChangeNotifier {
   final List<Map<String, dynamic>> samples = [];
   bool recording = false, _writing = false, _foreground = true;
   int _epoch = 0, _retries = 0;
+  int get connectionGeneration => _epoch;
   Timer? _scanTimer, _poll, _reconnectTimer;
   StreamSubscription<DiscoveredDevice>? _scan;
   StreamSubscription<ConnectionStateUpdate>? _connection;
@@ -186,7 +281,7 @@ class BatteryController extends ChangeNotifier {
         .scanForDevices(withServices: [], scanMode: ScanMode.lowLatency)
         .listen(
           (d) {
-            if (scanEpoch == _epoch && d.name.toUpperCase().startsWith('ANT')) {
+            if (scanEpoch == _epoch && deviceFamily(d.name) != null) {
               devices[d.id] = d;
               notifyListeners();
             }
@@ -213,20 +308,22 @@ class BatteryController extends ChangeNotifier {
     });
   }
 
-  Future<void> connect(DiscoveredDevice d) async {
+  Future<void> connect(DiscoveredDevice d, {String? meterCode}) async {
     await disconnect();
     if (_disposed) return;
     snapshot = null;
     updated = null;
     deviceId = d.id;
     deviceName = d.name.isEmpty ? 'ANT BMS' : d.name;
+    family = deviceFamily(d.name) ?? DeviceFamily.ant;
+    if (isMeter && meterCode != null) meter.setMatchCode(meterCode);
     _retries = 0;
     _resetDiagnostics();
     await _connect();
   }
 
   Future<void> _connect() async {
-    if (core == null) {
+    if (!isMeter && core == null) {
       error = startupError;
       diagnosticStage = '协议核心不可用';
       lastFailure = error;
@@ -236,7 +333,8 @@ class BatteryController extends ChangeNotifier {
     final id = deviceId;
     if (id == null) return;
     final epoch = ++_epoch;
-    core!.reset();
+    core?.reset();
+    meter.reset();
     diagnosticStage = '建立蓝牙连接';
     log('连接 $id · 通道 ${channel.name} · 尝试 ${_retries + 1}');
     state = _retries > 0 ? LinkState.reconnecting : LinkState.connecting;
@@ -267,7 +365,7 @@ class BatteryController extends ChangeNotifier {
   }
 
   Future<void> _subscribe(String id, int epoch) async {
-    final pair = switch (channel) {
+    final pair = isMeter ? ('FFE2', 'FFE1') : switch (channel) {
       Channel.standard => ('FFE1', 'FFE1'),
       Channel.auxiliaryA => ('FFF3', 'FFF4'),
       Channel.auxiliaryB => ('FFF5', 'FFF6'),
@@ -310,6 +408,7 @@ class BatteryController extends ChangeNotifier {
         pair.$1,
         pair.$2,
       );
+      if (isMeter && match != null && !match.standardService) match = null;
       if (match != null) break;
       if (attempt < 2)
         await Future<void>.delayed(Duration(milliseconds: 350 * (attempt + 1)));
@@ -347,7 +446,7 @@ class BatteryController extends ChangeNotifier {
     _poll = Timer.periodic(const Duration(milliseconds: 500), (_) {
       if (_foreground && epoch == _epoch) {
         _send();
-        if (_requestAt != null &&
+        if (!commandBusy && _requestAt != null &&
             DateTime.now().difference(_requestAt!).inSeconds >= 5) {
           _failed('5 秒内未收到有效实时应答');
         }
@@ -358,12 +457,12 @@ class BatteryController extends ChangeNotifier {
 
   bool _writeWithResponse = false;
   Future<void> _send() async {
-    if (_writing || _write == null || core == null) return;
+    if (_writing || commandBusy || _write == null || (!isMeter && core == null)) return;
     _writing = true;
     final epoch = _epoch;
     final characteristic = _write!;
     try {
-      final bytes = core!.request();
+      final bytes = isMeter ? meter.request() : core!.request();
       await characteristic
           .write(bytes, withResponse: _writeWithResponse)
           .timeout(const Duration(seconds: 3));
@@ -377,15 +476,34 @@ class BatteryController extends ChangeNotifier {
 
   void _accept(List<int> bytes) {
     if (!_foreground) return;
-    final result = core!.feed(bytes);
+    Map<String, dynamic> result;
+    if (isMeter) {
+      final readings = meter.feed(bytes);
+      parseErrors = meter.invalidFrames;
+      final events = <Map<String, dynamic>>[];
+      for (final reading in readings) {
+        if (reading['table'] == 2) {
+          _meterMetadata.addAll(reading);
+          if (snapshot != null) snapshot!.addAll(reading);
+          // Metadata must not keep stale realtime data looking fresh.
+        } else {
+          events.add({'type': 'snapshot', 'address': 0xa1,
+            'data': <String, dynamic>{...?snapshot, ..._meterMetadata, ...reading}});
+        }
+      }
+      result = {'events': events};
+    } else {
+      result = core!.feed(bytes);
+    }
     for (final raw in result['events'] as List) {
       final event = raw as Map;
       if (event['type'] == 'snapshot' && event['address'] == 0xa1) {
         validFrames++;
-        if (state != LinkState.demo && state != LinkState.connected) {
+        if (state != LinkState.connected && state != LinkState.demo) {
           log('收到首个有效实时帧，连接确认成功');
         }
-        diagnosticStage = state == LinkState.demo ? '模拟数据（非真实蓝牙）' : '实时数据就绪';
+        diagnosticStage = state == LinkState.demo ? '模拟数据（非真实蓝牙）'
+            : isMeter ? '蓝宝中继实时数据就绪' : 'ANT 实时数据就绪';
         snapshot = Map<String, dynamic>.from(event['data'] as Map);
         updated = DateTime.now();
         _requestAt = updated;
@@ -398,9 +516,7 @@ class BatteryController extends ChangeNotifier {
             'soc': snapshot!['soc'],
             'delta_mv': (snapshot!['delta_v'] as num) * 1000,
             'time': updated!.toIso8601String(),
-            'source': state == LinkState.demo
-                ? 'demo'
-                : (deviceId ?? 'unknown'),
+            'source': state == LinkState.demo ? 'demo' : deviceId ?? 'unknown',
             'voltage_v': snapshot!['voltage_v'],
             'current_a': snapshot!['current_a'],
             'power_w': snapshot!['power_w'],
@@ -410,6 +526,14 @@ class BatteryController extends ChangeNotifier {
             _saveTimer = null;
             persist();
           });
+        }
+      } else if (event['type'] == 'segment') {
+        final segment = event['data'] as Map;
+        final data = List<int>.from(segment['data'] as List);
+        if (segment['address'] == 0xa1 && segment['function'] == _expectedFunction &&
+            segment['register'] == _expectedRegister && data.length >= 2 &&
+            _commandReply != null && !_commandReply!.isCompleted) {
+          _commandReply!.complete(data[0] | data[1] << 8);
         }
       } else if (event['type'] == 'error') {
         parseErrors++;
@@ -426,6 +550,7 @@ class BatteryController extends ChangeNotifier {
         state == LinkState.idle)
       return;
     ++_epoch;
+    if (_commandReply != null && !_commandReply!.isCompleted) _commandReply!.complete(-1);
     _poll?.cancel();
     _connection?.cancel();
     _notifications?.cancel();
@@ -453,8 +578,9 @@ class BatteryController extends ChangeNotifier {
 
   Future<void> disconnect() async {
     final wasDemo = state == LinkState.demo;
-    log(wasDemo ? '用户断开模拟连接，清除模拟实时数据' : '断开连接 / 停止扫描与重连');
+    log('断开连接 / 停止扫描与重连');
     ++_epoch;
+    if (_commandReply != null && !_commandReply!.isCompleted) _commandReply!.complete(-1);
     _scanTimer?.cancel();
     _poll?.cancel();
     _reconnectTimer?.cancel();
@@ -468,9 +594,11 @@ class BatteryController extends ChangeNotifier {
     state = LinkState.idle;
     diagnosticStage = '已断开';
     error = null;
+    snapshot = null;
+    updated = null;
+    meter.reset();
+    _meterMetadata.clear();
     if (wasDemo) {
-      snapshot = null;
-      updated = null;
       deviceId = null;
       deviceName = '尚未选择电池';
     }
@@ -483,22 +611,17 @@ class BatteryController extends ChangeNotifier {
     await disconnect();
     if (_disposed) return;
     error = null;
-    if (core == null) {
-      error = startupError;
-      notifyListeners();
-      return;
-    }
-    deviceName = 'ANT@BLE24CBUB-5P4P · 演示';
-    _resetDiagnostics();
-    log('启动模拟连接：数据仅供演示');
+    if (core == null) { error = startupError; notifyListeners(); return; }
+    family = DeviceFamily.ant;
+    deviceName = '模拟电池';
     deviceId = null;
-    snapshot = null;
-    updated = null;
+    _resetDiagnostics();
+    log('启动模拟电池：与真实设备无关');
     state = LinkState.demo;
-    final demoEpoch = _epoch;
+    final epoch = _epoch;
     _accept(core!.demo());
     _poll = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!_disposed && _foreground && demoEpoch == _epoch && state == LinkState.demo) {
+      if (!_disposed && _foreground && epoch == _epoch && state == LinkState.demo) {
         _accept(core!.demo());
       }
     });

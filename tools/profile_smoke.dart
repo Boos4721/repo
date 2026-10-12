@@ -35,6 +35,6 @@ void main() {
           {'cells': List.filled(21, 0), 'capacity_ah': 170}).isEmpty,
       'matching pack');
   expect(permissionText(1).contains('实时监控'), 'level1');
-  expect(permissionText(3).contains('仅开放读取'), 'write still gated');
+  expect(permissionText(3).contains('需确认'), 'control still gated');
   print('16 profile/presentation scenarios passed.');
 }

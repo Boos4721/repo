@@ -64,7 +64,7 @@ String remainingTime(num? minutes) {
 String permissionText(num? level) => level == null
     ? '权限未知'
     : level >= 3
-    ? '${level.toInt()}级 · 设备允许写入，本版仅开放读取'
+    ? '${level.toInt()}级 · 可执行受限控制（需确认）'
     : level >= 2
     ? '${level.toInt()}级 · 可读取参数'
     : level >= 1

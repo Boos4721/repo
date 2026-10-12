@@ -8,6 +8,7 @@ import 'package:share_plus/share_plus.dart';
 import 'battery_controller.dart';
 import 'device_profile.dart';
 import 'gps_controller.dart';
+import 'device_protocol.dart';
 
 void main() => runApp(const AntApp());
 
@@ -62,6 +63,53 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
     if (mounted) setState(() {});
   }
 
+  Future<String?> askSecret(String title, {String initial = '', String? hint}) async {
+    var value = initial;
+    return showDialog<String>(context: context, builder: (ctx) => AlertDialog(
+      title: Text(title),
+      content: TextFormField(initialValue: initial, obscureText: true,
+        autocorrect: false, enableSuggestions: false,
+        decoration: InputDecoration(helperText: hint),
+        onChanged: (text) => value = text),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+        FilledButton(onPressed: () => Navigator.pop(ctx, value), child: const Text('确认')),
+      ]));
+  }
+
+  Future<void> authenticateBoard() async {
+    final generation = c.connectionGeneration;
+    final password = await askSecret('校验三级权限', hint: '输入已有 8 位 ASCII 密码；不保存，不尝试默认密码');
+    if (!mounted || password == null || generation != c.connectionGeneration) return;
+    try { await c.authenticate(password); }
+    catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+    }
+  }
+
+  Future<void> controlBoard(int command, String label) async {
+    final generation = c.connectionGeneration;
+    if (command == 9 && (gps.speedKmh ?? 0) > 2) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('车辆移动中，禁止重启')));
+      return;
+    }
+    final confirmed = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
+      title: Text('$label？'),
+      content: Text(command == 9
+          ? '请停车、关闭车辆动力并断开充电器。重启可能暂时中断供电、蓝牙连接和权限；电流近零不代表车辆已停稳。命令无应答也可能已执行。'
+          : '操作对象：${c.deviceName}。均衡实际运行由固件及电池条件决定；设备接受命令不代表已开始能量转移。请确认电池状况正常。'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('确认执行')),
+      ]));
+    if (!mounted || confirmed != true || generation != c.connectionGeneration) return;
+    if (command == 9 && (gps.speedKmh ?? 0) > 2) return;
+    try { await c.control(command); }
+    catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+    }
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     c.foreground(state == AppLifecycleState.resumed);
@@ -82,7 +130,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
 
   Map<String, dynamic>? get s => c.snapshot;
   String number(String key, int places) =>
-      s == null ? '--' : (s![key] as num).toStringAsFixed(places);
+      (s?[key] as num?)?.toStringAsFixed(places) ?? '--';
   Color get primary => Theme.of(context).colorScheme.primary;
   String get connection => switch (c.state) {
     LinkState.idle => '未连接',
@@ -158,7 +206,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                   style: TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
                 ),
                 const SizedBox(height: 8),
-                const Text('附近的 ANT 蓝牙设备'),
+                const Text('附近的 ANT 保护板 / 蓝宝电量计'),
                 if (c.error != null)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 8),
@@ -185,12 +233,22 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                         .map(
                           (d) => ListTile(
                             title: Text(d.name),
-                            subtitle: Text('${d.id}\n信号 ${d.rssi} dBm'),
+                            subtitle: Text('${deviceFamily(d.name) == DeviceFamily.lanbao ? "蓝宝电量计" : "ANT 保护板"} · ${d.id}\n信号 ${d.rssi} dBm'),
                             isThreeLine: true,
                             trailing: const Icon(Icons.chevron_right),
-                            onTap: () {
+                            onTap: () async {
                               Navigator.pop(ctx);
-                              c.connect(d);
+                              String? code;
+                              if (deviceFamily(d.name) == DeviceFamily.lanbao) {
+                                code = await askSecret('蓝宝匹配码', initial: '666666',
+                                  hint: '6 位数字或 12 位十六进制；只在本次运行内使用');
+                                if (code == null || !mounted) return;
+                              }
+                              try {
+                                await c.connect(d, meterCode: code);
+                              } catch (error) {
+                                if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+                              }
                             },
                           ),
                         )
@@ -296,8 +354,8 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
         ? <num>[]
         : [
             ...List<num>.from(s!['temperatures_c']),
-            s!['mos_temperature_c'] as num,
-            s!['balance_temperature_c'] as num,
+            if (s!['mos_temperature_c'] != null) s!['mos_temperature_c'] as num,
+            if (s!['balance_temperature_c'] != null) s!['balance_temperature_c'] as num,
           ];
     final stateText = s == null
         ? '等待数据'
@@ -335,7 +393,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                   ? '模拟数据'
                   : s == null
                   ? '尚无数据'
-                  : '${(s!['cells'] as List).length} 串',
+                  : c.isMeter ? '蓝宝中继 · 只读' : '${(s!['cells'] as List).length} 串',
             ),
           ],
         ),
@@ -433,11 +491,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                 Text('充电 MOS ${mos('charge_mos')}'),
                 Text('放电 MOS ${mos('discharge_mos')}'),
                 Text(
-                  '均衡 ${s == null
-                      ? '--'
-                      : s!['balance_state'] == 0
-                      ? '关闭'
-                      : '状态 ${s!['balance_state']}'}',
+                  '均衡 ${balanceText(s)}',
                 ),
               ],
             ),
@@ -483,6 +537,8 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
 
   String mos(String key) => s == null
       ? '--'
+      : s![key] == null
+      ? '不支持'
       : s![key] == 1
       ? '开启'
       : s![key] == 0
@@ -520,7 +576,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
         ),
       ),
       const SizedBox(height: 14),
-      if (data.isEmpty) box(const Text('连接设备后显示单体电压。')),
+      if (data.isEmpty) box(Text(c.isMeter ? '蓝宝不提供逐串电压；仅显示最高、最低及压差。' : '连接设备后显示单体电压。')),
       GridView.builder(
         shrinkWrap: true,
         physics: const NeverScrollableScrollPhysics(),
@@ -557,7 +613,8 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                         ),
                         Text('原始状态标志：${cell['flags']}'),
                         const SizedBox(height: 8),
-                        const Text('均衡位域需结合机型解释，本版不推测单体均衡状态。'),
+                        Text(cellBalancing(s, i) == null ? '主动均衡 / 未确认机型：不按位图推测均衡串号'
+                            : cellBalancing(s, i)! ? '该串正在均衡' : '该串未报告均衡'),
                       ],
                     ),
                   ),
@@ -870,7 +927,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
           ListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('通信通道'),
-            subtitle: const Text('切换后需重新连接'),
+            subtitle: Text(c.isMeter ? '蓝宝固定 FFE2 写 / FFE1 通知' : '切换后需重新连接'),
             trailing: DropdownButton<Channel>(
               value: c.channel,
               items: const [
@@ -884,7 +941,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                   child: Text('备用 B'),
                 ),
               ],
-              onChanged: (v) async {
+              onChanged: c.isMeter ? null : (v) async {
                 if (v == null) return;
                 if (v != Channel.standard) {
                   final ok = await showDialog<bool>(
@@ -936,14 +993,35 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
     box(
       Column(
         children: [
-          param('串数', s == null ? '--' : '${(s!['cells'] as List).length}'),
+          param('串数', c.isMeter ? '${s?['reported_cell_count'] ?? "--"}' : s == null ? '--' : '${(s!['cells'] as List).length}'),
           param('额定容量', '${number('capacity_ah', 1)} Ah'),
           param('SOH', '${number('soh', 0)} %'),
-          param('设备累计运行', s == null ? '--' : '${s!['runtime_s']} 秒'),
-          param('写入与控制', '尚未开放'),
+          param('设备累计运行', s?['runtime_s'] == null ? '--' : '${s!['runtime_s']} 秒'),
+          param('写入与控制', c.isMeter ? '中继只读' : '均衡 / 重启（需三级权限）'),
+          if (c.isMeter) param('中继保护板名称', s?['relay_name']?.toString() ?? '--'),
+          if (c.isMeter) param('中继保护板 MAC', s?['relay_mac']?.toString() ?? '--'),
+          if (c.isMeter) param('模块固件', s?['firmware']?.toString() ?? '--'),
+          if (c.isMeter) param('模块串数', s?['reported_cell_count']?.toString() ?? '--'),
+          if (c.isMeter) muted('蓝宝字段与容量换算需真机核对；不提供 MOS、均衡或保护板控制'),
         ],
       ),
     ),
+    heading('保护板控制'),
+    box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      muted(c.state == LinkState.demo ? '模拟模式不发送控制命令'
+          : c.isMeter ? '蓝宝中继不支持控制，请直连 ANT'
+          : '需三级权限；无应答不自动重发，不更改保护阈值'),
+      param('均衡状态', balanceText(s)),
+      OutlinedButton.icon(
+        onPressed: !c.isMeter && c.state == LinkState.connected && !c.stale && !c.commandBusy ? authenticateBoard : null,
+        icon: const Icon(Icons.lock_outline), label: const Text('校验已有三级密码')),
+      Wrap(spacing: 8, children: [
+        OutlinedButton(onPressed: c.canControl ? () => controlBoard(13, '开启均衡') : null, child: const Text('开启均衡')),
+        OutlinedButton(onPressed: c.canControl ? () => controlBoard(14, '关闭均衡') : null, child: const Text('关闭均衡')),
+        OutlinedButton(onPressed: c.canControl ? () => controlBoard(9, '重启保护板') : null, child: const Text('重启保护板')),
+      ]),
+      if (c.commandResult != null) Text(c.commandResult!),
+    ])),
     heading('连接诊断'),
     box(
       Column(
@@ -991,7 +1069,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
       ),
     ),
     heading('关于应用'),
-    box(const Text('ANT BMS · v0.4.2\n电池监控、GPS 车速与充放电记录')),
+    box(const Text('ANT BMS · v0.5.0\n电池监控、GPS 车速与充放电记录')),
   ];
   Widget param(String label, String value) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 8),
