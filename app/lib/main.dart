@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -45,6 +46,8 @@ class BatteryHome extends StatefulWidget {
 class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
   final c = BatteryController();
   int page = 0;
+  String trendKey = 'current_a';
+  String? selectedSession;
   @override
   void initState() {
     super.initState();
@@ -635,22 +638,85 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
     ],
   );
   List<Widget> history() {
-    final values = c.samples
-        .map((v) => (v['current_a'] as num).toDouble())
+    final sessions = c.samples
+        .map((row) => row['session'])
+        .whereType<String>()
+        .toSet();
+    final activeSession = sessions.contains(selectedSession)
+        ? selectedSession
+        : null;
+    final filtered = c.samples
+        .where(
+          (row) => activeSession == null || row['session'] == activeSession,
+        )
         .toList();
+    final points = filtered
+        .where(
+          (row) =>
+              row[trendKey] is num &&
+              DateTime.tryParse(row['time'] as String) != null,
+        )
+        .toList();
+    final values = points
+        .map((row) => (row[trendKey] as num).toDouble())
+        .toList();
+    String sessionLabel(String id) {
+      final row = c.samples.firstWhere((row) => row['session'] == id);
+      final date = DateTime.tryParse(row['time'] as String)?.toLocal();
+      final time = date == null
+          ? id
+          : '${date.month}/${date.day} ${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+      return '${row['source'] == 'demo' ? '模拟' : '电池'} · $time';
+    }
+
+    String axisTime(bool first) => points.isEmpty
+        ? '--'
+        : DateTime.parse(
+            points[first ? 0 : points.length - 1]['time'] as String,
+          ).toLocal().toString().substring(11, 19);
     return [
       const Text(
         '充放电记录',
         style: TextStyle(fontSize: 25, fontWeight: FontWeight.w600),
       ),
       const SizedBox(height: 8),
-      muted('本轮仅保留内存数据 · 最多 7200 个采样点'),
-      heading('电流趋势'),
+      muted('自动保存到本机 · 最近 7200 个采样点'),
+      if (c.storageError != null) Text(c.storageError!),
+      DropdownButton<String>(
+        value: activeSession,
+        hint: const Text('全部记录会话'),
+        isExpanded: true,
+        items: [
+          const DropdownMenuItem<String>(value: null, child: Text('全部记录会话')),
+          ...sessions.map(
+            (id) => DropdownMenuItem(value: id, child: Text(sessionLabel(id))),
+          ),
+        ],
+        onChanged: (v) => setState(() => selectedSession = v),
+      ),
+      SegmentedButton<String>(
+        segments: const [
+          ButtonSegment(value: 'current_a', label: Text('电流')),
+          ButtonSegment(value: 'voltage_v', label: Text('电压')),
+          ButtonSegment(value: 'power_w', label: Text('功率')),
+          ButtonSegment(value: 'soc', label: Text('电量')),
+        ],
+        selected: {trendKey},
+        onSelectionChanged: (v) => setState(() => trendKey = v.first),
+      ),
+      heading('记录趋势'),
       box(
         Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            muted('电流 / A'),
+            muted(
+              {
+                'current_a': '电流 / A',
+                'voltage_v': '电压 / V',
+                'power_w': '功率 / W',
+                'soc': '电量 / %',
+              }[trendKey]!,
+            ),
             const SizedBox(height: 10),
             SizedBox(
               height: 170,
@@ -662,23 +728,22 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                         values,
                         primary,
                         Theme.of(context).colorScheme.outlineVariant,
+                        times: points
+                            .map(
+                              (row) =>
+                                  DateTime.parse(row['time'] as String)
+                                      .millisecondsSinceEpoch,
+                            )
+                            .toList(),
+                        sessions: points
+                            .map((row) => row['session'] as String?)
+                            .toList(),
                       ),
                     ),
             ),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                muted(
-                  c.samples.isEmpty
-                      ? '--'
-                      : (c.samples.first['time'] as String).substring(11, 19),
-                ),
-                muted(
-                  c.samples.isEmpty
-                      ? '--'
-                      : (c.samples.last['time'] as String).substring(11, 19),
-                ),
-              ],
+              children: [muted(axisTime(true)), muted(axisTime(false))],
             ),
           ],
         ),
@@ -701,7 +766,9 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                   ShareParams(
                     files: [
                       XFile.fromData(
-                        Uint8List.fromList(c.csv().codeUnits),
+                        Uint8List.fromList(
+                          utf8.encode(c.csv(session: activeSession)),
+                        ),
                         mimeType: 'text/csv',
                         name: 'ant-bms-record.csv',
                       ),
@@ -711,9 +778,38 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                 );
               },
         icon: const Icon(Icons.ios_share),
-        label: const Text('导出 CSV'),
+        label: Text(activeSession == null ? '导出全部 CSV' : '导出当前会话 CSV'),
       ),
-      muted('${c.samples.length} 个采样点 · CSV 分别标注设备 / 模拟来源'),
+      muted('${filtered.length} 个采样点 · 导出与当前筛选一致'),
+      TextButton.icon(
+        onPressed: c.samples.isEmpty
+            ? null
+            : () async {
+                final ok = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: const Text('清空本地记录？'),
+                    content: const Text('建议先导出 CSV，清空后无法恢复。'),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, false),
+                        child: const Text('取消'),
+                      ),
+                      FilledButton(
+                        onPressed: () => Navigator.pop(ctx, true),
+                        child: const Text('清空'),
+                      ),
+                    ],
+                  ),
+                );
+                if (ok == true) {
+                  setState(() => selectedSession = null);
+                  await c.clearRecords();
+                }
+              },
+        icon: const Icon(Icons.delete_outline),
+        label: const Text('清空记录'),
+      ),
     ];
   }
 
@@ -856,12 +952,40 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
         ],
       ),
     ),
-    heading('关于应用'),
+    heading('连接诊断'),
     box(
-      const Text(
-        'ANT BMS · v0.2\n独立第三方客户端\n协议参考 maibms（MIT）\nRust 核心 + Flutter 界面',
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          param(
+            '最后更新',
+            c.updated?.toLocal().toString().substring(11, 19) ?? '--',
+          ),
+          param('数据状态', c.stale ? '未更新 / 已过期' : '实时'),
+          OutlinedButton.icon(
+            onPressed: s == null || c.stale ? null : c.refresh,
+            icon: const Icon(Icons.refresh),
+            label: const Text('立即刷新'),
+          ),
+          TextButton.icon(
+            onPressed: () =>
+                SharePlus.instance.share(ShareParams(text: c.logs.join('\n'))),
+            icon: const Icon(Icons.ios_share),
+            label: const Text('分享诊断日志'),
+          ),
+          ...c.logs.reversed
+              .take(8)
+              .map(
+                (line) => Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: muted(line),
+                ),
+              ),
+        ],
       ),
     ),
+    heading('关于应用'),
+    box(const Text('ANT BMS · v0.4\n电池监控与充放电记录')),
   ];
   Widget param(String label, String value) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 8),
@@ -877,21 +1001,39 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
 class TrendPainter extends CustomPainter {
   final List<double> values;
   final Color color, grid;
-  TrendPainter(this.values, this.color, this.grid);
+  final List<int> times;
+  final List<String?> sessions;
+  TrendPainter(
+    this.values,
+    this.color,
+    this.grid, {
+    required this.times,
+    required this.sessions,
+  });
   @override
   void paint(Canvas canvas, Size size) {
     if (values.length < 2) return;
-    final lo = values.reduce(min),
-        hi = values.reduce(max),
-        range = max(1.0, hi - lo);
+    final rawLo = values.reduce(min), rawHi = values.reduce(max);
+    final pad = rawHi == rawLo ? 0.5 : (rawHi - rawLo) * 0.1;
+    final lo = rawLo - pad, hi = rawHi + pad, range = hi - lo;
+    final start = times.reduce(min),
+        end = times.reduce(max),
+        span = max(1, end - start);
     final path = Path();
     for (var i = 0; i < values.length; i++) {
-      final x = i / (values.length - 1) * size.width,
+      final ratio = end == start
+          ? i / (values.length - 1)
+          : (times[i] - start) / span;
+      final x = ratio.clamp(0, 1) * size.width,
           y = size.height - 12 - (values[i] - lo) / range * (size.height - 24);
-      if (i == 0) {
+      if (i == 0 || sessions[i] != sessions[i - 1]) {
         path.moveTo(x, y);
       } else {
         path.lineTo(x, y);
+      }
+      if ((i == 0 || sessions[i] != sessions[i - 1]) &&
+          (i == values.length - 1 || sessions[i] != sessions[i + 1])) {
+        canvas.drawCircle(Offset(x, y), 2.5, Paint()..color = color);
       }
     }
     for (var i = 0; i < 3; i++) {
@@ -905,7 +1047,7 @@ class TrendPainter extends CustomPainter {
       );
       final tp = TextPainter(
         text: TextSpan(
-          text: (hi - i * (hi - lo) / 2).toStringAsFixed(1),
+          text: (hi - i * range / 2).toStringAsFixed(1),
           style: TextStyle(color: color, fontSize: 11),
         ),
         textDirection: TextDirection.ltr,

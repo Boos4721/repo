@@ -1,11 +1,16 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:path_provider/path_provider.dart';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'core.dart';
+import 'record_archive.dart';
+
+import 'package:device_info_plus/device_info_plus.dart';
 
 enum LinkState {
   idle,
@@ -24,12 +29,72 @@ class BatteryController extends ChangeNotifier {
   AntCore? core;
   String? startupError;
   BatteryController() {
+    ready = _restore();
+    _heartbeat = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!_disposed && _foreground) notifyListeners();
+    });
     try {
       core = AntCore();
     } catch (e) {
       startupError = 'Rust 核心未加载，请先构建本机库。$e';
     }
   }
+  late final Future<void> ready;
+  RecordArchive? _archive;
+  Timer? _heartbeat, _saveTimer;
+  bool _disposed = false;
+  String? storageError, sessionId;
+  final List<String> logs = [];
+  void log(String message) {
+    logs.add('${DateTime.now().toIso8601String()} $message');
+    if (logs.length > 200) logs.removeAt(0);
+  }
+
+  Future<void> _restore() async {
+    try {
+      final dir = await getApplicationSupportDirectory();
+      _archive = RecordArchive(File('${dir.path}/records-v1.json'));
+      final restored = await _archive!.load();
+      samples.addAll(restored.rows);
+      storageError = restored.warning;
+      if (restored.warning != null) log(restored.warning!);
+      log('本地记录已载入：${samples.length} 点');
+    } catch (e) {
+      storageError = '本地记录读取失败：$e';
+      log(storageError!);
+    }
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> persist() async {
+    await ready;
+    if (_archive == null) return;
+    try {
+      await _archive!.save(samples);
+    } catch (e) {
+      storageError = '本地记录保存失败：$e';
+      log(storageError!);
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  Future<void> clearRecords() async {
+    await ready;
+    recording = false;
+    samples.clear();
+    sessionId = null;
+    await persist();
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> refresh() async {
+    if (state == LinkState.demo && core != null) {
+      _accept(core!.demo());
+    } else if (state == LinkState.connected) {
+      await _send();
+    }
+  }
+
   LinkState state = LinkState.idle;
   Channel channel = Channel.standard;
   Map<String, dynamic>? snapshot;
@@ -58,19 +123,22 @@ class BatteryController extends ChangeNotifier {
     final scanEpoch = ++_epoch;
     error = null;
     if (Platform.isAndroid) {
-      final result = await [
-        Permission.bluetoothScan,
-        Permission.bluetoothConnect,
-        Permission.locationWhenInUse,
-      ].request();
-      if (result.values.any((v) => v.isPermanentlyDenied)) {
-        error = '蓝牙权限被禁用，请在系统设置中授权。';
+      final sdk = (await DeviceInfoPlugin().androidInfo).version.sdkInt;
+      final permissions = sdk >= 31
+          ? <Permission>[Permission.bluetoothScan, Permission.bluetoothConnect]
+          : <Permission>[Permission.locationWhenInUse];
+      final result = await permissions.request();
+      if (scanEpoch != _epoch || _disposed) return;
+      if (result.values.any((status) => !status.isGranted)) {
+        error = sdk >= 31 ? '需要允许“附近的设备”权限。' : 'Android 11 及以下扫描蓝牙需要定位权限。';
+        log(error!);
         notifyListeners();
         return;
       }
     }
     if (scanEpoch != _epoch) return;
     devices.clear();
+    log('开始扫描 ANT 设备');
     state = LinkState.scanning;
     notifyListeners();
     _scan = ble
@@ -100,6 +168,7 @@ class BatteryController extends ChangeNotifier {
 
   Future<void> connect(DiscoveredDevice d) async {
     await disconnect();
+    if (_disposed) return;
     snapshot = null;
     updated = null;
     deviceId = d.id;
@@ -118,6 +187,7 @@ class BatteryController extends ChangeNotifier {
     if (id == null) return;
     final epoch = ++_epoch;
     core!.reset();
+    log('连接 $id · 通道 ${channel.name} · 尝试 ${_retries + 1}');
     state = _retries > 0 ? LinkState.reconnecting : LinkState.connecting;
     notifyListeners();
     _connection = ble
@@ -239,6 +309,9 @@ class BatteryController extends ChangeNotifier {
         if (state != LinkState.demo) state = LinkState.connected;
         if (recording) {
           samples.add({
+            'session': sessionId,
+            'soc': snapshot!['soc'],
+            'delta_mv': (snapshot!['delta_v'] as num) * 1000,
             'time': updated!.toIso8601String(),
             'source': state == LinkState.demo
                 ? 'demo'
@@ -248,6 +321,10 @@ class BatteryController extends ChangeNotifier {
             'power_w': snapshot!['power_w'],
           });
           if (samples.length > 7200) samples.removeAt(0);
+          _saveTimer ??= Timer(const Duration(seconds: 3), () {
+            _saveTimer = null;
+            persist();
+          });
         }
       } else if (event['type'] == 'error') {
         error = event['message'].toString();
@@ -270,6 +347,7 @@ class BatteryController extends ChangeNotifier {
     _requestAt = null;
     core?.reset();
     error = message;
+    log(message);
     if (_foreground && deviceId != null && _retries < 3) {
       _retries++;
       state = LinkState.reconnecting;
@@ -296,11 +374,14 @@ class BatteryController extends ChangeNotifier {
     core?.reset();
     state = LinkState.idle;
     recording = false;
-    notifyListeners();
+    await persist();
+    if (!_disposed) notifyListeners();
   }
 
   Future<void> demo() async {
     await disconnect();
+    if (_disposed) return;
+    error = null;
     if (core == null) {
       error = startupError;
       notifyListeners();
@@ -317,20 +398,41 @@ class BatteryController extends ChangeNotifier {
     });
   }
 
-  void toggleRecord() {
+  Future<void> toggleRecord() async {
+    await ready;
+    if (_disposed) return;
+    if (!recording && (snapshot == null || stale)) return;
     recording = !recording;
-    notifyListeners();
+    if (recording) sessionId = DateTime.now().microsecondsSinceEpoch.toString();
+    log(recording ? '开始记录会话 $sessionId' : '停止记录');
+    await persist();
+    if (!_disposed) notifyListeners();
   }
 
   void foreground(bool value) {
     _foreground = value;
-    if (value && state == LinkState.connected) _requestAt = DateTime.now();
+    if (!value) persist();
+    if (value && state == LinkState.lost && deviceId != null) {
+      _retries = 0;
+      _connect();
+    }
+    if (value &&
+        (state == LinkState.connected ||
+            state == LinkState.connecting ||
+            state == LinkState.reconnecting))
+      _requestAt = DateTime.now();
   }
 
-  String csv() =>
-      'time,voltage_V,current_A,power_W,source\n${samples.map((s) => '${s['time']},${s['voltage_v']},${s['current_a']},${s['power_w']},${s['source']}').join('\n')}';
+  String csv({String? session}) => exportRecordCsv(
+    samples.where((row) => session == null || row['session'] == session),
+  );
+
   @override
   void dispose() {
+    _disposed = true;
+    _heartbeat?.cancel();
+    _saveTimer?.cancel();
+    persist();
     ++_epoch;
     _scanTimer?.cancel();
     _poll?.cancel();

@@ -24,6 +24,7 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          flutter-version: 3.47.7
           cache: true
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal
@@ -41,6 +42,7 @@ jobs:
         run: |
           dart pub get
           dart run profile_smoke.dart
+          dart run archive_smoke.dart
       - name: Compile and package unsigned IPA
         run: bash scripts/package_ios_unsigned.sh
       - name: Upload IPA
