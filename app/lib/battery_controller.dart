@@ -424,8 +424,10 @@ class BatteryController extends ChangeNotifier {
       log('FFE0 未匹配，使用实际服务 ${service.id} 中的已知 ANT 特征对');
     _write = writer;
     diagnosticStage = '订阅通知 / 等待有效应答';
-    _writeWithResponse = writer.isWritableWithResponse;
+    // Match maibms iOS: prefer writeWithoutResponse when the characteristic supports it.
+    _writeWithResponse = !writer.isWritableWithoutResponse;
     log('通道就绪：服务 ${service.id} / 写入 ${writer.id} / 通知 ${reader.id}');
+    log('写入模式：${_writeWithResponse ? "带应答" : "无应答"}');
     _notifications = reader.subscribe().listen(
       (bytes) {
         if (epoch != _epoch || _disposed) return;
@@ -446,9 +448,10 @@ class BatteryController extends ChangeNotifier {
     _poll = Timer.periodic(const Duration(milliseconds: 500), (_) {
       if (_foreground && epoch == _epoch) {
         _send();
+        final responseTimeout = state == LinkState.connected ? 5 : 10;
         if (!commandBusy && _requestAt != null &&
-            DateTime.now().difference(_requestAt!).inSeconds >= 5) {
-          _failed('5 秒内未收到有效实时应答');
+            DateTime.now().difference(_requestAt!).inSeconds >= responseTimeout) {
+          _failed('$responseTimeout 秒内未收到有效实时应答（请求 $requestsSent，通知 $notificationCount，有效帧 $validFrames）');
         }
       }
     });

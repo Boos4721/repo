@@ -1069,7 +1069,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
       ),
     ),
     heading('关于应用'),
-    box(const Text('ANT BMS · v0.5.0\n电池监控、GPS 车速与充放电记录')),
+    box(const Text('ANT BMS · v0.5.1\n电池监控、GPS 车速与充放电记录')),
   ];
   Widget param(String label, String value) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 8),
