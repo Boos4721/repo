@@ -12,6 +12,7 @@ import 'gps_controller.dart';
 import 'device_protocol.dart';
 import 'bms_details.dart';
 import 'dashboard.dart';
+import 'apt_controller.dart';
 import 'app_theme.dart';
 
 Future<void> main() async {
@@ -37,6 +38,7 @@ class BatteryHome extends StatefulWidget {
 
 class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
   final c = BatteryController();
+  late final apt = AptController(c.ble);
   final gps = GpsController();
   int page = 0;
   String trendKey = 'current_a';
@@ -46,6 +48,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     c.addListener(changed);
+    apt.addListener(changed);
     gps.addListener(changed);
   }
 
@@ -121,6 +124,8 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     c.removeListener(changed);
+    apt.removeListener(changed);
+    apt.dispose();
     c.dispose();
     gps.removeListener(changed);
     gps.dispose();
@@ -734,6 +739,8 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
   }
 
   List<Widget> device() => [
+    box(settingLink('APT 控制器', apt.status, Icons.bluetooth,
+      () => openSection('APT 控制器', aptWidgets))),
     const Text(
       '设置',
       style: TextStyle(fontSize: 25, fontWeight: FontWeight.w600),
@@ -775,7 +782,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
     )).toList())),
     if (appThemes.error != null) muted(appThemes.error!),
     heading('关于应用'),
-    box(const Text('ANT BMS · v0.9.1\n仅与设备通信；历史、记录和快照保存在本机。\n快照和模拟不发送控制命令。')),
+    box(const Text('ANT BMS · v0.10.0\n仅与设备通信；历史、记录和快照保存在本机。\n快照和模拟不发送控制命令。')),
   ];
 
   List<Widget> historyDevices() => [
@@ -929,6 +936,13 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
   ];
 
   List<Widget> controls() => [
+    heading('APT 控制器'),
+    box(Column(children: [
+      param('连接状态', apt.status),
+      param('转速 / 电压 / 电流', '-- / -- / --'),
+      settingLink('连接与收包诊断', 'FFE0 / FFE1 · 接收原始通知', Icons.bluetooth,
+        () => openSection('APT 控制器', aptWidgets)),
+    ])),
     heading('均衡详情'),
     box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       param('均衡状态', balanceText(s)),
@@ -1015,7 +1029,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
   void openSection(String title, List<Widget> Function() children) {
     Navigator.push(context, MaterialPageRoute<void>(builder: (ctx) => Scaffold(
       appBar: AppBar(title: Text(title)),
-      body: SafeArea(child: ListenableBuilder(listenable: c, builder: (_, child) => ListView(
+      body: SafeArea(child: ListenableBuilder(listenable: Listenable.merge([c, apt]), builder: (_, child) => ListView(
         padding: const EdgeInsets.all(16), children: children()))))));
   }
 
@@ -1032,6 +1046,54 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('保存失败：请检查匹配码格式或所选设备')));
     }
   }
+
+  List<Widget> aptWidgets() => [
+    box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      param('状态', apt.status),
+      param('设备', apt.name.isEmpty ? '--' : apt.name),
+      param('服务 / 写入 / 通知', 'FFE0 / FFE1 / FFE1'),
+      param('写入能力', apt.writeCapability),
+      param('通知 / 字节', '${apt.packets.count} / ${apt.packets.bytes}'),
+      param('最近收包', apt.packets.lastReceived?.toLocal().toString() ?? '--'),
+      muted('仅连接、订阅通知，不发送查询或调参命令。通道相同不能确认设备型号，请手动选择你的 APT。'),
+      if (apt.error != null) Text(apt.error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+      Wrap(spacing: 8, children: [
+        FilledButton.icon(onPressed: apt.scanning || apt.connecting ? null : apt.scan,
+          icon: const Icon(Icons.search), label: const Text('扫描 APT')),
+        OutlinedButton(onPressed: apt.disconnect, child: const Text('断开 APT')),
+      ]),
+    ])),
+    heading('附近设备'),
+    box(Column(children: [
+      if (apt.devices.isEmpty) muted(apt.scanning ? '扫描中…' : '先扫描，再选择控制器'),
+      ...((apt.devices.values.toList()..sort((a, b) => b.rssi.compareTo(a.rssi))).map((device) => ListTile(
+        contentPadding: EdgeInsets.zero,
+        title: Text(device.name.isEmpty ? '未命名设备' : device.name),
+        subtitle: Text('${device.rssi} dBm · ${device.id}'),
+        trailing: const Icon(Icons.bluetooth),
+        onTap: apt.connecting ? null : () async {
+          if (device.id == c.deviceId && c.state != LinkState.idle && c.state != LinkState.lost) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('这台设备当前用于保护板连接，请选择 APT 控制器')));
+            return;
+          }
+          await apt.connect(device);
+        },
+      ))),
+    ])),
+    heading('原始通知 · 最近 40 包，每包最多显示 256 字节'),
+    box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      muted('通知尚未解析为控制器指标。无主动通知的设备可能一直等待首包。原始数据可能含设备标识，分享前请检查。'),
+      Wrap(spacing: 8, children: [
+        TextButton(onPressed: apt.clearPackets, child: const Text('清空收包')),
+        TextButton(onPressed: apt.packets.rows.isEmpty ? null : () async {
+          await Clipboard.setData(ClipboardData(text: apt.packets.rows.reversed.join('\n')));
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已复制原始通知')));
+        }, child: const Text('复制原始通知')),
+      ]),
+      SelectableText(apt.packets.rows.isEmpty ? '尚未收到通知' : apt.packets.rows.join('\n\n'),
+        style: const TextStyle(fontFamily: 'monospace', fontSize: 11)),
+    ])),
+  ];
 
   List<Widget> developerWidgets() => [
     heading('轮询频率'),
