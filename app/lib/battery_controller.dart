@@ -12,6 +12,8 @@ import 'ble_channel.dart';
 import 'record_archive.dart';
 import 'device_protocol.dart';
 import 'bms_details.dart';
+import 'device_history.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'package:device_info_plus/device_info_plus.dart';
 
@@ -33,6 +35,7 @@ class BatteryController extends ChangeNotifier {
   String? startupError;
   BatteryController() {
     ready = _restore();
+    _autoConnectAtStartup();
     _heartbeat = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!_disposed && _foreground) notifyListeners();
     });
@@ -44,6 +47,98 @@ class BatteryController extends ChangeNotifier {
   }
   late final Future<void> ready;
   RecordArchive? _archive;
+  final history = DeviceHistory();
+  final _secrets = const FlutterSecureStorage(
+    iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock_this_device));
+  String? historyError, _pendingMeterCode;
+  bool _rememberedForSession = false;
+  Future<void> _historyTail = Future.value();
+  Future<void> _historyTask(Future<void> Function() action) {
+    final result = _historyTail.catchError((Object _) {}).then((_) => action());
+    _historyTail = result;
+    return result;
+  }
+  String _codeKey(String id) => 'ant_bms_lanbao_$id';
+  Future<String?> savedMeterCode(String id) => _secrets.read(key: _codeKey(id));
+
+  Future<void> _autoConnectAtStartup() async {
+    try {
+      await ready;
+      final saved = history.find(history.autoId);
+      if (_disposed || _epoch != 0 || !_foreground || !history.autoConnect || saved == null) return;
+      diagnosticStage = '等待蓝牙就绪，自动连接历史设备';
+      notifyListeners();
+      if (ble.status != BleStatus.ready) {
+        await ble.statusStream.firstWhere((status) => status == BleStatus.ready)
+            .timeout(const Duration(seconds: 20));
+      }
+      if (_disposed || _epoch != 0 || !_foreground || !history.autoConnect || history.autoId != saved.id) return;
+      await connectSaved(saved);
+    } catch (_) {
+      if (!_disposed && state == LinkState.idle && _epoch == 0) {
+        diagnosticStage = '自动连接未启动，请检查蓝牙或从历史设备手动连接';
+        log(diagnosticStage);
+        notifyListeners();
+      }
+    }
+  }
+
+  Future<void> connectSaved(SavedDevice saved) async {
+    await ready;
+    final found = history.find(saved.id);
+    if (found == null) throw StateError('该设备已从历史记录移除');
+    final generation = _epoch;
+    String? code;
+    if (found.family == 'lanbao') {
+      code = await savedMeterCode(found.id);
+      if (code == null) throw StateError('配对码不可用，请重新扫描并输入蓝宝配对码');
+    }
+    if (_disposed || generation != _epoch || history.find(found.id) == null) return;
+    await _selectDevice(found.id, found.name,
+        found.family == 'lanbao' ? DeviceFamily.lanbao : DeviceFamily.ant,
+        meterCode: code, savedChannel: found.channel);
+  }
+
+  Future<void> setStartupAutoConnect(bool value) async {
+    await ready;
+    try {
+      await _historyTask(() async { history.autoConnect = value; await history.save(); });
+      historyError = null;
+    } catch (_) { historyError = '自动连接设置保存失败，请重试'; }
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> forgetDevice(String id) async {
+    await ready;
+    try {
+      await _historyTask(() async {
+        if (history.find(id)?.family == 'lanbao') await _secrets.delete(key: _codeKey(id));
+        history.forget(id);
+        await history.save();
+      });
+      historyError = null;
+    } catch (_) { historyError = '移除历史设备或配对码失败，请重试'; }
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> _rememberConnected() async {
+    final id = deviceId;
+    if (id == null || state != LinkState.connected || _rememberedForSession) return;
+    _rememberedForSession = true;
+    final saved = SavedDevice(id, deviceName, family.name,
+        isMeter ? 'standard' : channel.name, DateTime.now());
+    final code = isMeter ? _pendingMeterCode : null;
+    try {
+      await _historyTask(() async {
+        if (code != null) await _secrets.write(key: _codeKey(id), value: code);
+        history.remember(saved);
+        await history.save();
+      });
+      historyError = null;
+      log('有效连接已保存到历史设备（配对码不进入日志）');
+    } catch (_) { historyError = '连接成功，但历史设备或配对码保存失败'; }
+    if (!_disposed) notifyListeners();
+  }
   Timer? _heartbeat, _saveTimer;
   bool _disposed = false;
   String? storageError, sessionId;
@@ -62,6 +157,9 @@ class BatteryController extends ChangeNotifier {
       storageError = restored.warning;
       if (restored.warning != null) log(restored.warning!);
       log('本地记录已载入：${samples.length} 点');
+      history.file = File('${dir.path}/devices-v1.json');
+      try { await history.load(); }
+      catch (_) { historyError = '历史设备读取失败，未自动连接；损坏文件已保留'; }
     } catch (e) {
       storageError = '本地记录读取失败：$e';
       log(storageError!);
@@ -371,6 +469,13 @@ class BatteryController extends ChangeNotifier {
   }
 
   Future<void> connect(DiscoveredDevice d, {String? meterCode}) async {
+    await ready;
+    await _selectDevice(d.id, d.name.isEmpty ? 'ANT BMS' : d.name,
+        deviceFamily(d.name) ?? DeviceFamily.ant, meterCode: meterCode);
+  }
+
+  Future<void> _selectDevice(String id, String name, DeviceFamily selectedFamily,
+      {String? meterCode, String? savedChannel}) async {
     await disconnect();
     if (_disposed) return;
     identity.clear();
@@ -379,10 +484,15 @@ class BatteryController extends ChangeNotifier {
     detailsResult = null;
     snapshot = null;
     updated = null;
-    deviceId = d.id;
-    deviceName = d.name.isEmpty ? 'ANT BMS' : d.name;
-    family = deviceFamily(d.name) ?? DeviceFamily.ant;
-    if (isMeter && meterCode != null) meter.setMatchCode(meterCode);
+    deviceId = id;
+    deviceName = name;
+    family = selectedFamily;
+    if (savedChannel != null) channel = Channel.values.firstWhere((c) => c.name == savedChannel, orElse: () => Channel.standard);
+    _pendingMeterCode = meterCode?.replaceAll(' ', '').trim().toUpperCase();
+    if (isMeter) {
+      if (_pendingMeterCode == null) throw StateError('需要蓝宝配对码');
+      meter.setMatchCode(_pendingMeterCode!);
+    }
     _retries = 0;
     _resetDiagnostics();
     await _connect();
@@ -579,6 +689,7 @@ class BatteryController extends ChangeNotifier {
         _retries = 0;
         error = null;
         if (state != LinkState.demo) state = LinkState.connected;
+        if (state == LinkState.connected) _rememberConnected();
         if (recording) {
           samples.add({
             'session': sessionId,
@@ -653,6 +764,7 @@ class BatteryController extends ChangeNotifier {
 
   Future<void> disconnect() async {
     final wasDemo = state == LinkState.demo;
+    _rememberedForSession = false;
     log('断开连接 / 停止扫描与重连');
     ++_epoch;
     if (_commandReply != null && !_commandReply!.isCompleted) _commandReply!.complete(-1);

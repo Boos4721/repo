@@ -16,6 +16,8 @@ if manifest.exists():
     text=text.replace('<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30" />', '<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />')
     if 'android.permission.ACCESS_COARSE_LOCATION' not in text:
         text=text.replace('    <application', '    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <application', 1)
+    if 'android:allowBackup=' not in text:
+        text=text.replace('<application', '<application android:allowBackup="false"', 1)
     manifest.write_text(text)
 for name in ['build.gradle.kts','build.gradle']:
     gradle=root/'android/app'/name
@@ -34,6 +36,19 @@ for name in ['Debug.xcconfig','Release.xcconfig']:
     config=root/'ios/Flutter'/name
     if config.exists() and 'Rust.xcconfig' not in config.read_text():
         with config.open('a') as f:f.write('\n#include "Rust.xcconfig"\n')
+
+# Enable the app's default Keychain access (no shared credential group).
+entitlements=root/'ios/Runner/Runner.entitlements'
+if entitlements.parent.exists():
+    data={}
+    if entitlements.exists():
+        with entitlements.open('rb') as f:data=plistlib.load(f)
+    data.setdefault('keychain-access-groups', [])
+    with entitlements.open('wb') as f:plistlib.dump(data,f)
+    for name in ['Debug.xcconfig','Release.xcconfig']:
+        config=root/'ios/Flutter'/name
+        if config.exists() and 'CODE_SIGN_ENTITLEMENTS' not in config.read_text():
+            with config.open('a') as f:f.write('\nCODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements\n')
 
 # The app only needs when-in-use location; do not compile the always-permission path.
 podfile=root/'ios/Podfile'

@@ -1,7 +1,7 @@
 name: ant_bms
 description: ANT BMS third-party Rust and Flutter client.
 publish_to: none
-version: 0.6.0+9
+version: 0.7.0+10
 environment:
   sdk: '>=3.6.0 <4.0.0'
 dependencies:
@@ -14,6 +14,7 @@ dependencies:
   permission_handler: ^12.0.1
   share_plus: ^11.0.0
   geolocator: ^14.0.2
+  flutter_secure_storage: 9.2.4
 dev_dependencies:
   flutter_test:
     sdk: flutter

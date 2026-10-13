@@ -111,6 +111,15 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> forgetSavedDevice(String id, String name) async {
+    final confirmed = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
+      title: const Text('移除历史设备？'),
+      content: Text('移除 $name，并删除该设备已保存的蓝宝配对码。不会删除充放电记录；当前连接不受影响。'),
+      actions: [TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+        FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('移除'))]));
+    if (confirmed == true && mounted) await c.forgetDevice(id);
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     c.foreground(state == AppLifecycleState.resumed);
@@ -208,6 +217,10 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                 ),
                 const SizedBox(height: 8),
                 const Text('附近的 ANT 保护板 / 蓝宝电量计'),
+                TextButton.icon(onPressed: () {
+                  Navigator.pop(ctx);
+                  setState(() => page = 3);
+                }, icon: const Icon(Icons.history), label: Text('历史设备（${c.history.devices.length}）')),
                 if (c.error != null)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 8),
@@ -241,8 +254,11 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                               Navigator.pop(ctx);
                               String? code;
                               if (deviceFamily(d.name) == DeviceFamily.lanbao) {
-                                code = await askSecret('蓝宝匹配码', initial: '666666',
-                                  hint: '6 位数字或 12 位十六进制；只在本次运行内使用');
+                                String? savedCode;
+                                try { savedCode = await c.savedMeterCode(d.id); } catch (_) {}
+                                if (!mounted) return;
+                                code = await askSecret('蓝宝匹配码', initial: savedCode ?? '666666',
+                                  hint: '6 位数字或 12 位十六进制；成功连接后按设备安全保存');
                                 if (code == null || !mounted) return;
                               }
                               try {
@@ -919,6 +935,31 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
         ],
       ),
     ),
+    heading('历史设备'),
+    box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      SwitchListTile(contentPadding: EdgeInsets.zero,
+        title: const Text('启动时自动连接'),
+        subtitle: const Text('连接上次成功收到实时数据的真实设备；模拟不参与'),
+        value: c.history.autoConnect, onChanged: c.setStartupAutoConnect),
+      if (c.historyError != null) Text(c.historyError!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+      if (c.history.devices.isEmpty) muted('连接成功后自动保存历史设备'),
+      ConstrainedBox(constraints: const BoxConstraints(maxHeight: 320), child: ListView(
+        shrinkWrap: true, children: c.history.devices.map((saved) => ListTile(
+          contentPadding: EdgeInsets.zero,
+          title: Text(saved.name),
+          subtitle: Text('${saved.family == "lanbao" ? "蓝宝 · 使用已保存配对码" : "ANT · ${saved.channel}"}\n${saved.connectedAt.toLocal()}'),
+          isThreeLine: true,
+          onTap: () async {
+            try { await c.connectSaved(saved); }
+            catch (error) {
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+            }
+          },
+          trailing: IconButton(icon: const Icon(Icons.delete_outline), tooltip: '移除设备与配对码',
+            onPressed: () => forgetSavedDevice(saved.id, saved.name)),
+        )).toList())),
+      muted('配对码不显示在列表或诊断日志中；手动断开后本次不自动重连，下次启动按开关设置连接'),
+    ])),
     heading('连接管理'),
     box(
       Column(
@@ -1107,7 +1148,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
       ),
     ),
     heading('关于应用'),
-    box(const Text('ANT BMS · v0.6.0\n电池监控、GPS 车速与充放电记录')),
+    box(const Text('ANT BMS · v0.7.0\n电池监控、GPS 车速与充放电记录')),
   ];
   Widget param(String label, String value) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 8),

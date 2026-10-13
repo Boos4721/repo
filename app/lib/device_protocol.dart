@@ -131,7 +131,9 @@ class LanbaoProtocol {
         result.add({'table': 1, 'cells': <Map<String, dynamic>>[],
           'temperatures_c': [raw(14, 1, signed: true)],
           'voltage_v': raw(0, 2) / 100, 'current_a': current, 'soc': raw(6, 2) / 10,
-          'remaining_ah': raw(15, 4) / 100000000,
+          // Raw field is scaled Ah: do not divide by 1000 a second time.
+          // User's direct ANT/meter comparison: ~94.7 Ah was displayed as 0.1 Ah.
+          'remaining_ah': raw(15, 4) / 100000,
           'power_w': raw(19, 4, signed: true),
           'max_cell_v': raw(82, 2) / 1000, 'min_cell_v': raw(84, 2) / 1000,
           'delta_v': raw(86, 2) / 1000,

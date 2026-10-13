@@ -37,7 +37,7 @@ void main() {
     for (var i = 0; i < length; i++) { data[off + i] = value >> (8 * (length - 1 - i)) & 255; }
   }
   put(0, 2, 7840); put(2, 4, -1234); put(6, 2, 560);
-  put(14, 1, -5); put(15, 4, 1000000000); put(19, 4, -967);
+  put(14, 1, -5); put(15, 4, 9470000); put(19, 4, -967);
   put(82, 2, 3730); put(84, 2, 3720); put(86, 2, 10);
   final frame = response(data);
   protocol.reset();
@@ -47,7 +47,7 @@ void main() {
   final reading = readings.single;
   check(reading['current_a'] == -12.34 && reading['power_w'] == -967, 'signed 32-bit');
   check(reading['voltage_v'] == 78.4 && reading['soc'] == 56.0, 'voltage and soc');
-  check(reading['remaining_ah'] == 10.0, 'upstream capacity scaling');
+  check(reading['remaining_ah'] == 94.7, 'real-device capacity scale: no extra /1000');
   check((reading['temperatures_c'] as List).single == -5, 'signed temperature');
   check(!reading.containsKey('permission') && !reading.containsKey('charge_mos'), 'no fabricated board fields');
   check(protocol.feed([...frame, ...response(List.filled(134, 0))]).length == 2, 'combined tables');
