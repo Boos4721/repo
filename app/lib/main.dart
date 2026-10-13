@@ -24,7 +24,7 @@ class AntApp extends StatelessWidget {
   const AntApp({super.key});
   @override
   Widget build(BuildContext context) => ListenableBuilder(listenable: appThemes,
-    builder: (_, _) => MaterialApp(title: 'ANT BMS', debugShowCheckedModeBanner: false,
+    builder: (context, child) => MaterialApp(title: 'ANT BMS', debugShowCheckedModeBanner: false,
       theme: appThemes.theme(Brightness.light), darkTheme: appThemes.theme(Brightness.dark),
       themeMode: appThemes.mode, home: const BatteryHome()));
 }
