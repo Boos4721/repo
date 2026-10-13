@@ -1,8 +1,8 @@
-"""Wrap platform binaries with installation notes and integrity checks."""
+"""Stage files for upload-artifact, which creates the downloadable ZIP itself."""
 from pathlib import Path
 import hashlib
 import sys
-import zipfile
+import shutil
 
 root = Path(__file__).resolve().parents[1]
 platform = sys.argv[1]
@@ -17,13 +17,11 @@ notes = ('Android 11+ 测试版，使用测试签名，不用于正式发布。\
          '不同 CI 构建的测试签名可能不同，不能保证覆盖安装；卸载会清除本机数据，请先导出记录。\n'
          if platform == 'android' else 'iOS 未签名测试版，需自行使用有效证书重新签名后安装。\n')
 digest = hashlib.sha256(binary.read_bytes()).hexdigest()
-target = root / 'dist' / f'ANT-BMS-{platform}-test.zip'
-target.parent.mkdir(parents=True, exist_ok=True)
-with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:
-    archive.write(binary, name)
-    archive.writestr('README.txt', notes)
-    archive.writestr('SHA256SUMS.txt', f'{digest}  {name}\n')
-with zipfile.ZipFile(target) as archive:
-    if archive.testzip() is not None:
-        raise SystemExit('ZIP integrity check failed')
+target = root / 'dist' / f'{platform}-artifact'
+target.mkdir(parents=True, exist_ok=True)
+shutil.copyfile(binary, target / name)
+(target / 'README.txt').write_text(notes, encoding='utf-8')
+(target / 'SHA256SUMS.txt').write_text(f'{digest}  {name}\n', encoding='utf-8')
+if hashlib.sha256((target / name).read_bytes()).hexdigest() != digest:
+    raise SystemExit('Staged binary integrity check failed')
 print(target)

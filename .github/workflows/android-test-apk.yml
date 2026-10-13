@@ -49,14 +49,15 @@ jobs:
       - name: Compile test APK
         working-directory: app
         run: flutter build apk --release --target-platform android-arm,android-arm64,android-x64
-      - name: Verify native libraries and package ZIP
+      - name: Verify native libraries and stage artifact files
         run: |
           python3 -c "import zipfile; z=zipfile.ZipFile('app/build/app/outputs/flutter-apk/app-release.apk'); assert all('lib/'+abi+'/libant_core.so' in z.namelist() for abi in ['arm64-v8a','armeabi-v7a','x86_64'])"
           python3 scripts/package_test_zip.py android
-      - name: Upload APK ZIP
+      - name: Upload APK and notes
         uses: actions/upload-artifact@v4
         with:
           name: ANT-BMS-Android-test-${{ github.run_number }}
-          path: dist/ANT-BMS-android-test.zip
+          path: dist/android-artifact/*
+          compression-level: 0
           if-no-files-found: error
           retention-days: 14

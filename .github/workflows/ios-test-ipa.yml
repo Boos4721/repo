@@ -54,12 +54,13 @@ jobs:
           dart run ui_features_smoke.dart
       - name: Compile and package unsigned IPA
         run: bash scripts/package_ios_unsigned.sh
-      - name: Package iOS ZIP
+      - name: Stage iOS artifact files
         run: python3 scripts/package_test_zip.py ios
-      - name: Upload IPA ZIP
+      - name: Upload IPA and notes
         uses: actions/upload-artifact@v4
         with:
           name: ANT-BMS-iOS-unsigned-${{ github.run_number }}
-          path: dist/ANT-BMS-ios-test.zip
+          path: dist/ios-artifact/*
+          compression-level: 0
           if-no-files-found: error
           retention-days: 14
