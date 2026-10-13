@@ -1,4 +1,4 @@
-name: Build iOS Test IPA
+name: Build iOS Test IPA ZIP
 on:
   workflow_dispatch:
   push:
@@ -39,7 +39,7 @@ jobs:
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
       - name: Verify dashboard layouts
         working-directory: app
-        run: flutter test test/dashboard_test.dart
+        run: flutter test
       - name: Check presentation rules
         working-directory: tools
         run: |
@@ -54,10 +54,12 @@ jobs:
           dart run ui_features_smoke.dart
       - name: Compile and package unsigned IPA
         run: bash scripts/package_ios_unsigned.sh
-      - name: Upload IPA
+      - name: Package iOS ZIP
+        run: python3 scripts/package_test_zip.py ios
+      - name: Upload IPA ZIP
         uses: actions/upload-artifact@v4
         with:
           name: ANT-BMS-iOS-unsigned-${{ github.run_number }}
-          path: dist/ANT-BMS-unsigned.ipa
+          path: dist/ANT-BMS-ios-test.zip
           if-no-files-found: error
           retention-days: 14

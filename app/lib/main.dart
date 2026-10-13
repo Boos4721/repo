@@ -12,34 +12,21 @@ import 'gps_controller.dart';
 import 'device_protocol.dart';
 import 'bms_details.dart';
 import 'dashboard.dart';
+import 'app_theme.dart';
 
-void main() => runApp(const AntApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await appThemes.restore();
+  runApp(const AntApp());
+}
 
 class AntApp extends StatelessWidget {
   const AntApp({super.key});
-  ThemeData theme(Brightness brightness) {
-    final scheme = ColorScheme.fromSeed(
-      seedColor: BatteryDashboard.blue,
-      brightness: brightness,
-    );
-    return ThemeData(
-      useMaterial3: true,
-      colorScheme: scheme,
-      scaffoldBackgroundColor: brightness == Brightness.light
-          ? const Color(0xfff4f7f7)
-          : const Color(0xff101819),
-      fontFamily: '.SF Pro Text',
-    );
-  }
-
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    title: 'ANT BMS',
-    debugShowCheckedModeBanner: false,
-    theme: theme(Brightness.light),
-    darkTheme: theme(Brightness.dark),
-    home: const BatteryHome(),
-  );
+  Widget build(BuildContext context) => ListenableBuilder(listenable: appThemes,
+    builder: (_, _) => MaterialApp(title: 'ANT BMS', debugShowCheckedModeBanner: false,
+      theme: appThemes.theme(Brightness.light), darkTheme: appThemes.theme(Brightness.dark),
+      themeMode: appThemes.mode, home: const BatteryHome()));
 }
 
 class BatteryHome extends StatefulWidget {
@@ -302,16 +289,16 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
-      title: const Text(
+      title: Text(
         'ANT BMS',
-        style: TextStyle(fontWeight: FontWeight.w700, color: Colors.white),
+        style: TextStyle(fontWeight: FontWeight.w700, color: Theme.of(context).colorScheme.onPrimary),
       ),
-      backgroundColor: BatteryDashboard.blue,
-      systemOverlayStyle: SystemUiOverlayStyle.light,
-      iconTheme: const IconThemeData(color: Colors.white),
+      backgroundColor: Theme.of(context).colorScheme.primary,
+      systemOverlayStyle: Theme.of(context).brightness == Brightness.dark ? SystemUiOverlayStyle.dark : SystemUiOverlayStyle.light,
+      iconTheme: IconThemeData(color: Theme.of(context).colorScheme.onPrimary),
       actions: [
         TextButton.icon(
-          style: TextButton.styleFrom(foregroundColor: Colors.white),
+          style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.onPrimary),
           onPressed: devices,
           icon: const Icon(Icons.bluetooth, size: 18),
           label: Text(connection),
@@ -781,8 +768,14 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
       settingLink('连接诊断', c.diagnosticStage, Icons.bluetooth_searching,
         () => openSection('连接诊断', connectionDiagnostics)),
     ])),
+    heading('外观'),
+    box(Column(children: AppThemeChoice.values.map((choice) => RadioListTile<AppThemeChoice>(
+      title: Text(AppThemes.labels[choice.index]), value: choice, groupValue: appThemes.choice,
+      onChanged: (value) async { if (value != null) { await appThemes.select(value); if (mounted) setState(() {}); } },
+    )).toList())),
+    if (appThemes.error != null) muted(appThemes.error!),
     heading('关于应用'),
-    box(const Text('ANT BMS · v0.8.0\n仅与设备通信；历史、记录和快照保存在本机。\n快照和模拟不发送控制命令。')),
+    box(const Text('ANT BMS · v0.9.0\n仅与设备通信；历史、记录和快照保存在本机。\n快照和模拟不发送控制命令。')),
   ];
 
   List<Widget> historyDevices() => [
