@@ -13,6 +13,8 @@ import 'record_archive.dart';
 import 'device_protocol.dart';
 import 'bms_details.dart';
 import 'device_history.dart';
+import 'snapshot_store.dart';
+import 'frame_diagnostics.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 import 'package:device_info_plus/device_info_plus.dart';
@@ -48,6 +50,60 @@ class BatteryController extends ChangeNotifier {
   late final Future<void> ready;
   RecordArchive? _archive;
   final history = DeviceHistory();
+  final snapshots = SnapshotStore();
+  bool snapshotSaving = false;
+  String? snapshotError;
+
+  Future<void> captureSnapshot() async {
+    await ready;
+    if (snapshot == null || stale || snapshotSaving) throw StateError('需要新鲜的实时或模拟数据');
+    snapshotSaving = true;
+    notifyListeners();
+    try {
+      snapshots.capture(name: deviceName, deviceId: deviceId, family: family.name,
+          demo: state == LinkState.demo, data: snapshot!, identity: identity);
+      await snapshots.save();
+      snapshotError = null;
+      log('离线快照已保存（不包含配对码或密码）');
+    } catch (_) { snapshotError = '快照保存失败，请重试'; }
+    finally { snapshotSaving = false; if (!_disposed) notifyListeners(); }
+  }
+
+  void clearDiagnostics() { logs.clear(); if (!_disposed) notifyListeners(); }
+
+  Future<void> setDeveloperOptions({int? pollMs, bool? frameLogging, int? logLines}) async {
+    if (pollMs != null && ![300, 600, 900].contains(pollMs) ||
+        logLines != null && ![20, 80].contains(logLines)) throw ArgumentError('Invalid developer option');
+    await ready;
+    try {
+      await _historyTask(() async {
+        if (pollMs != null) history.pollMs = pollMs;
+        if (frameLogging != null) history.frameLogging = frameLogging;
+        if (logLines != null) history.logLines = logLines;
+        await history.save();
+      });
+      historyError = null;
+    } catch (_) { historyError = '开发者设置保存失败，本次仍按当前设置运行'; }
+    if (pollMs != null && (_poll?.isActive ?? false) && _write != null && state != LinkState.demo) {
+      _poll?.cancel();
+      _startPolling(_epoch);
+    }
+    log('轮询 ${history.pollMs}ms · 脱敏帧日志 ${history.frameLogging ? "开" : "关"}');
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> saveMeterCode(String id, String code) async {
+    final normalized = code.replaceAll(' ', '').trim().toUpperCase();
+    LanbaoProtocol().setMatchCode(normalized);
+    await ready;
+    await _historyTask(() async {
+      if (history.find(id)?.family != 'lanbao') throw StateError('请先选择历史蓝宝设备');
+      await _secrets.write(key: _codeKey(id), value: normalized);
+    });
+    // Explicit user edit affects next connection, not the currently active reader.
+    log('蓝宝匹配码已安全更新，下次连接生效');
+    if (!_disposed) notifyListeners();
+  }
   final _secrets = const FlutterSecureStorage(
     iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock_this_device));
   String? historyError, _pendingMeterCode;
@@ -160,6 +216,9 @@ class BatteryController extends ChangeNotifier {
       history.file = File('${dir.path}/devices-v1.json');
       try { await history.load(); }
       catch (_) { historyError = '历史设备读取失败，未自动连接；损坏文件已保留'; }
+      snapshots.file = File('${dir.path}/snapshots-v1.json');
+      try { await snapshots.load(); }
+      catch (_) { snapshotError = '快照读取失败，损坏文件已保留'; }
     } catch (e) {
       storageError = '本地记录读取失败：$e';
       log(storageError!);
@@ -248,6 +307,7 @@ class BatteryController extends ChangeNotifier {
         await Future<void>.delayed(const Duration(milliseconds: 30));
       }
       if (_writing || epoch != _epoch || _write == null || !_foreground) throw StateError('连接已变化或读取忙');
+      if (history.frameLogging) log(safeTxSummary(frame, meter: false));
       await _write!.write(frame, withResponse: _writeWithResponse)
           .timeout(const Duration(seconds: 3));
       return await reply.future.timeout(const Duration(seconds: 5));
@@ -300,7 +360,9 @@ class BatteryController extends ChangeNotifier {
         _detailsReply = reply;
         _detailAddress = block.$1;
         _detailLength = block.$2;
-        await _write!.write(antReadParameter(block.$1, block.$2), withResponse: _writeWithResponse)
+        final frame = antReadParameter(block.$1, block.$2);
+        if (history.frameLogging) log(safeTxSummary(frame, meter: false));
+        await _write!.write(frame, withResponse: _writeWithResponse)
             .timeout(const Duration(seconds: 3));
         final data = await reply.future.timeout(const Duration(seconds: 2));
         if (epoch != _epoch || data.length != block.$2) throw StateError('未取得完整参数块');
@@ -610,6 +672,7 @@ class BatteryController extends ChangeNotifier {
         notificationCount++;
         receivedBytes += bytes.length;
         lastNotification = DateTime.now();
+        if (history.frameLogging) log(safeRxSummary(bytes, meter: isMeter, commandBusy: commandBusy));
         if (snapshot == null) log('收到蓝牙通知：${bytes.length} 字节');
         _accept(bytes);
       },
@@ -621,7 +684,12 @@ class BatteryController extends ChangeNotifier {
     await Future<void>.delayed(const Duration(milliseconds: 250));
     if (epoch != _epoch) return;
     _requestAt = DateTime.now();
-    _poll = Timer.periodic(const Duration(milliseconds: 500), (_) {
+    _startPolling(epoch);
+    await _send();
+  }
+
+  void _startPolling(int epoch) {
+    _poll = Timer.periodic(Duration(milliseconds: history.pollMs), (_) {
       if (_foreground && epoch == _epoch) {
         _send();
         final responseTimeout = state == LinkState.connected ? 5 : 10;
@@ -631,7 +699,6 @@ class BatteryController extends ChangeNotifier {
         }
       }
     });
-    await _send();
   }
 
   bool _writeWithResponse = false;
@@ -642,6 +709,7 @@ class BatteryController extends ChangeNotifier {
     final characteristic = _write!;
     try {
       final bytes = isMeter ? meter.request() : core!.request();
+      if (history.frameLogging) log(safeTxSummary(bytes, meter: isMeter));
       await characteristic
           .write(bytes, withResponse: _writeWithResponse)
           .timeout(const Duration(seconds: 3));

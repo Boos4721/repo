@@ -37,6 +37,9 @@ jobs:
       - name: Check Dart and Flutter source
         working-directory: app
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
+      - name: Verify dashboard layouts
+        working-directory: app
+        run: flutter test test/dashboard_test.dart
       - name: Check presentation rules
         working-directory: tools
         run: |
@@ -48,6 +51,7 @@ jobs:
           dart run device_protocol_smoke.dart
           dart run bms_details_smoke.dart
           dart run device_history_smoke.dart
+          dart run ui_features_smoke.dart
       - name: Compile and package unsigned IPA
         run: bash scripts/package_ios_unsigned.sh
       - name: Upload IPA

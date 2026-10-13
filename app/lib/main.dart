@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 
 import 'battery_controller.dart';
@@ -10,6 +11,7 @@ import 'device_profile.dart';
 import 'gps_controller.dart';
 import 'device_protocol.dart';
 import 'bms_details.dart';
+import 'dashboard.dart';
 
 void main() => runApp(const AntApp());
 
@@ -17,7 +19,7 @@ class AntApp extends StatelessWidget {
   const AntApp({super.key});
   ThemeData theme(Brightness brightness) {
     final scheme = ColorScheme.fromSeed(
-      seedColor: const Color(0xff087e78),
+      seedColor: BatteryDashboard.blue,
       brightness: brightness,
     );
     return ThemeData(
@@ -219,7 +221,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                 const Text('附近的 ANT 保护板 / 蓝宝电量计'),
                 TextButton.icon(onPressed: () {
                   Navigator.pop(ctx);
-                  setState(() => page = 3);
+                  setState(() => page = 4);
                 }, icon: const Icon(Icons.history), label: Text('历史设备（${c.history.devices.length}）')),
                 if (c.error != null)
                   Padding(
@@ -302,11 +304,14 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
     appBar: AppBar(
       title: const Text(
         'ANT BMS',
-        style: TextStyle(fontWeight: FontWeight.w700),
+        style: TextStyle(fontWeight: FontWeight.w700, color: Colors.white),
       ),
-      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      backgroundColor: BatteryDashboard.blue,
+      systemOverlayStyle: SystemUiOverlayStyle.light,
+      iconTheme: const IconThemeData(color: Colors.white),
       actions: [
         TextButton.icon(
+          style: TextButton.styleFrom(foregroundColor: Colors.white),
           onPressed: devices,
           icon: const Icon(Icons.bluetooth, size: 18),
           label: Text(connection),
@@ -316,7 +321,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
     ),
     body: SafeArea(
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(18, 6, 18, 24),
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
         children: [
           if (c.startupError != null)
             box(
@@ -333,7 +338,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
             ),
-          if (s != null && c.stale)
+          if (s != null && c.stale && page != 0)
             Padding(
               padding: const EdgeInsets.only(bottom: 12),
               child: box(
@@ -343,7 +348,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
                 padding: const EdgeInsets.all(12),
               ),
             ),
-          ...[overview, cells, history, device][page](),
+          ...[overview, cells, history, controls, device][page](),
         ],
       ),
     ),
@@ -354,7 +359,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
         NavigationDestination(
           icon: Icon(Icons.dashboard_outlined),
           selectedIcon: Icon(Icons.dashboard),
-          label: '总览',
+          label: '实时',
         ),
         NavigationDestination(
           icon: Icon(Icons.layers_outlined),
@@ -362,193 +367,20 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
           label: '单体',
         ),
         NavigationDestination(icon: Icon(Icons.show_chart), label: '记录'),
-        NavigationDestination(icon: Icon(Icons.tune), label: '设备'),
+        NavigationDestination(icon: Icon(Icons.tune), label: '控制'),
+        NavigationDestination(icon: Icon(Icons.settings_outlined), label: '设置'),
       ],
     ),
   );
-  List<Widget> overview() {
-    final temps = s == null
-        ? <num>[]
-        : [
-            ...List<num>.from(s!['temperatures_c']),
-            if (s!['mos_temperature_c'] != null) s!['mos_temperature_c'] as num,
-            if (s!['balance_temperature_c'] != null) s!['balance_temperature_c'] as num,
-          ];
-    final stateText = s == null
-        ? '等待数据'
-        : switch (s!['state']) {
-            1 => '静止',
-            2 => '充电',
-            3 => '待机',
-            4 => '放电',
-            5 => '异常',
-            _ => '未知状态',
-          };
-    return [
-      box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(children: [
-          const Icon(Icons.speed),
-          const SizedBox(width: 8),
-          const Expanded(child: Text('GPS 车速')),
-          Switch(value: gps.enabled, onChanged: gps.busy ? null : (value) {
-            if (value) { gps.start(); } else { gps.stop(); }
-          }),
-        ]),
-        Text('${gps.speedKmh?.toStringAsFixed(1) ?? '--'} km/h',
-            style: const TextStyle(fontSize: 38, fontWeight: FontWeight.w600)),
-        muted(gps.detail),
-        muted('独立于 BMS / 控制器 · 仅前台定位 · 不保存位置'),
-      ])),
-      const SizedBox(height: 14),
-      Padding(
-        padding: const EdgeInsets.only(bottom: 14),
-        child: Row(
-          children: [
-            Expanded(child: muted(c.deviceName)),
-            muted(
-              c.state == LinkState.demo
-                  ? '模拟数据'
-                  : s == null
-                  ? '尚无数据'
-                  : c.isMeter ? '蓝宝中继 · 只读' : '${(s!['cells'] as List).length} 串',
-            ),
-          ],
-        ),
-      ),
-      box(
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                muted('剩余电量'),
-                Chip(label: Text(stateText), side: BorderSide.none),
-              ],
-            ),
-            Text.rich(
-              TextSpan(
-                text: number('soc', 0),
-                style: const TextStyle(
-                  fontSize: 64,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: -2,
-                ),
-                children: const [
-                  TextSpan(
-                    text: ' %',
-                    style: TextStyle(
-                      fontSize: 23,
-                      letterSpacing: 0,
-                      fontWeight: FontWeight.w400,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 8),
-            LinearProgressIndicator(
-              value: s == null
-                  ? 0
-                  : (s!['soc'] as num).toDouble().clamp(0, 100) / 100,
-              minHeight: 8,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            const SizedBox(height: 16),
-            muted(
-              '剩余 ${number('remaining_ah', 1)} / ${number('capacity_ah', 1)} Ah',
-            ),
-          ],
-        ),
-      ),
-      const SizedBox(height: 12),
-      LayoutBuilder(
-        builder: (context, constraints) => Wrap(
-          spacing: 12,
-          runSpacing: 12,
-          children:
-              [
-                    ('总电压', number('voltage_v', 2), 'V'),
-                    ('电流 · 带符号', number('current_a', 1), 'A'),
-                    ('设备功率', number('power_w', 0), 'W'),
-                    (
-                      '最高原始温度',
-                      temps.isEmpty ? '--' : temps.reduce(max).toString(),
-                      '°C',
-                    ),
-                  ]
-                  .map(
-                    (m) => SizedBox(
-                      width: (constraints.maxWidth - 12) / 2,
-                      child: metric(m.$1, m.$2, m.$3),
-                    ),
-                  )
-                  .toList(),
-        ),
-      ),
-      heading('电池状态'),
-      box(
-        Column(
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text('单体压差'),
-                Text(
-                  '${s == null ? '--' : ((s!['delta_v'] as num) * 1000).toStringAsFixed(0)} mV',
-                  style: TextStyle(color: primary, fontWeight: FontWeight.w600),
-                ),
-              ],
-            ),
-            const Divider(height: 28),
-            Wrap(
-              spacing: 18,
-              runSpacing: 8,
-              children: [
-                Text('充电 MOS ${mos('charge_mos')}'),
-                Text('放电 MOS ${mos('discharge_mos')}'),
-                Text(
-                  '均衡 ${balanceText(s)}',
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-      ...temperatureWidgets(),
-      heading('BMS 预计剩余时间'),
-      box(
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            param('充电剩余', remainingTime(s?['charge_remaining_min'] as num?)),
-            param('放电剩余', remainingTime(s?['discharge_remaining_min'] as num?)),
-            muted('由保护板返回，仅供参考；负载变化会影响估算。'),
-          ],
-        ),
-      ),
-      heading('保护与告警'),
-      box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('保护：${decodeBmsBits(s?['protection_bits'] as String?).join("；").isEmpty ? "无已报告保护位" : decodeBmsBits(s?['protection_bits'] as String?).join("；")}'),
-        const SizedBox(height: 8),
-        Text('告警：${decodeBmsBits(s?['warning_bits'] as String?, warning: true).join("；").isEmpty ? "无已报告告警位" : decodeBmsBits(s?['warning_bits'] as String?, warning: true).join("；")}'),
-        ExpansionTile(tilePadding: EdgeInsets.zero, title: const Text('运行状态与原始位域'), children: [
-          Text(decodeBmsBits(s?['warning_bits'] as String?, warning: true, states: true).join('；')),
-          SelectableText('保护：${s?['protection_bits'] ?? "--"}\n告警：${s?['warning_bits'] ?? "--"}'),
-        ]),
-        muted(c.stale ? '连接未更新：上述为最后读数，不能用于判断当前故障' : '状态位与告警分开显示，未知位保留'),
-      ])),
-      if (s == null)
-        Padding(
-          padding: const EdgeInsets.only(top: 20),
-          child: FilledButton.icon(
-            onPressed: devices,
-            icon: const Icon(Icons.bluetooth),
-            label: const Text('连接电池 / 体验演示'),
-          ),
-        ),
-    ];
-  }
+  List<Widget> overview() => [
+    BatteryDashboard(data: s, identity: c.identity, name: c.deviceName, connection: connection,
+      meter: c.isMeter, stale: c.stale, demo: c.state == LinkState.demo,
+      gpsEnabled: gps.enabled, gpsSpeed: gps.speedKmh, gpsDetail: gps.detail,
+      onGps: gps.busy ? null : (value) { if (value) { gps.start(); } else { gps.stop(); } },
+      onConnect: devices, onCells: () => setState(() => page = 1),
+      onRecords: () => setState(() => page = 2), onControl: () => setState(() => page = 3),
+      onDetails: () => openSection('版本与参数', deviceDetails)),
+  ];
 
   String mos(String key) => s == null
       ? '--'
@@ -916,7 +748,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
 
   List<Widget> device() => [
     const Text(
-      '我的设备',
+      '设置',
       style: TextStyle(fontSize: 25, fontWeight: FontWeight.w600),
     ),
     const SizedBox(height: 16),
@@ -935,6 +767,25 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
         ],
       ),
     ),
+    box(Column(children: [
+      settingLink('历史设备', '${c.history.devices.length} 台', Icons.history,
+        () => openSection('历史设备', () => [...historyDevices(), ...connectionSettings()])),
+      settingLink('版本与只读参数', c.detailsUpdated == null ? '待读取' : '已读取', Icons.info_outline,
+        () => openSection('版本与参数', () => [...deviceDetails(), ...batteryParameters()])),
+      settingLink('权限与控制', permissionText(s?['permission'] as num?), Icons.lock_outline,
+        () => setState(() => page = 3)),
+      settingLink('离线快照', '${c.snapshots.rows.length} 个', Icons.camera_alt_outlined,
+        () => openSection('快照', snapshotWidgets)),
+      settingLink('开发者', '轮询 / 脱敏日志 / 匹配码', Icons.code,
+        () => openSection('开发者', developerWidgets)),
+      settingLink('连接诊断', c.diagnosticStage, Icons.bluetooth_searching,
+        () => openSection('连接诊断', connectionDiagnostics)),
+    ])),
+    heading('关于应用'),
+    box(const Text('ANT BMS · v0.8.0\n仅与设备通信；历史、记录和快照保存在本机。\n快照和模拟不发送控制命令。')),
+  ];
+
+  List<Widget> historyDevices() => [
     heading('历史设备'),
     box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       SwitchListTile(contentPadding: EdgeInsets.zero,
@@ -960,6 +811,9 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
         )).toList())),
       muted('配对码不显示在列表或诊断日志中；手动断开后本次不自动重连，下次启动按开关设置连接'),
     ])),
+  ];
+
+  List<Widget> connectionSettings() => [
     heading('连接管理'),
     box(
       Column(
@@ -1029,6 +883,9 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
         ],
       ),
     ),
+  ];
+
+  List<Widget> batteryParameters() => [
     heading('电池参数'),
     box(
       Column(
@@ -1051,6 +908,9 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
         ],
       ),
     ),
+  ];
+
+  List<Widget> deviceDetails() => [
     heading('设备版本与均衡参数 · 只读'),
     box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       if (!c.isMeter) TextButton(
@@ -1073,6 +933,9 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
       if (c.detailsResult != null) Text(c.detailsResult!),
       if (!c.isMeter) muted('至少一级权限；仅读取指定非密码块，未取得的值显示 --'),
     ])),
+  ];
+
+  List<Widget> controls() => [
     heading('均衡详情'),
     box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       param('均衡状态', balanceText(s)),
@@ -1101,6 +964,9 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
       ]),
       if (c.commandResult != null) Text(c.commandResult!),
     ])),
+  ];
+
+  List<Widget> connectionDiagnostics() => [
     heading('连接诊断'),
     box(
       Column(
@@ -1147,9 +1013,117 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
         ],
       ),
     ),
-    heading('关于应用'),
-    box(const Text('ANT BMS · v0.7.0\n电池监控、GPS 车速与充放电记录')),
   ];
+  Widget settingLink(String title, String detail, IconData icon, VoidCallback action) => ListTile(
+    contentPadding: EdgeInsets.zero, leading: Icon(icon, color: primary), title: Text(title),
+    subtitle: Text(detail, maxLines: 2, overflow: TextOverflow.ellipsis),
+    trailing: const Icon(Icons.chevron_right), onTap: action);
+
+  void openSection(String title, List<Widget> Function() children) {
+    Navigator.push(context, MaterialPageRoute<void>(builder: (ctx) => Scaffold(
+      appBar: AppBar(title: Text(title)),
+      body: SafeArea(child: ListenableBuilder(listenable: c, builder: (_, child) => ListView(
+        padding: const EdgeInsets.all(16), children: children()))))));
+  }
+
+  Future<void> editSavedCode(String id) async {
+    try {
+      final old = await c.savedMeterCode(id);
+      if (!mounted) return;
+      final code = await askSecret('蓝宝匹配码', initial: old ?? '',
+        hint: '保存到所选设备，下次连接生效；不改变当前连接');
+      if (code == null || !mounted) return;
+      await c.saveMeterCode(id, code);
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已保存，下次连接生效')));
+    } catch (_) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('保存失败：请检查匹配码格式或所选设备')));
+    }
+  }
+
+  List<Widget> developerWidgets() => [
+    heading('轮询频率'),
+    box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      SegmentedButton<int>(segments: const [
+        ButtonSegment(value: 900, label: Text('900ms')),
+        ButtonSegment(value: 600, label: Text('600ms')),
+        ButtonSegment(value: 300, label: Text('300ms'))], selected: {c.history.pollMs},
+        onSelectionChanged: (value) => c.setDeveloperOptions(pollMs: value.single)),
+      const SizedBox(height: 10), muted('默认 600ms；300ms 更频繁，弱信号可能增加负担。仅前台轮询。'),
+    ])),
+    box(Column(children: [
+      SwitchListTile(contentPadding: EdgeInsets.zero, title: const Text('帧级日志（脱敏）'),
+        subtitle: const Text('TX 密码/匹配码隐藏；RX 仅记录帧头或摘要'),
+        value: c.history.frameLogging, onChanged: (value) => c.setDeveloperOptions(frameLogging: value)),
+      ListTile(contentPadding: EdgeInsets.zero, title: const Text('日志显示级别'),
+        trailing: DropdownButton<int>(value: c.history.logLines, items: const [
+          DropdownMenuItem(value: 20, child: Text('普通')),
+          DropdownMenuItem(value: 80, child: Text('详细'))],
+          onChanged: (value) { if (value != null) c.setDeveloperOptions(logLines: value); })),
+      if (c.historyError != null) Text(c.historyError!),
+    ])),
+    heading('蓝宝匹配码'),
+    box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      if (!c.history.devices.any((saved) => saved.family == 'lanbao')) muted('先成功连接蓝宝，才能按设备管理匹配码'),
+      ...c.history.devices.where((saved) => saved.family == 'lanbao').map((saved) => ListTile(
+        contentPadding: EdgeInsets.zero, title: Text(saved.name),
+        subtitle: const Text('匹配码按设备安全保存，不显示在日志中'),
+        trailing: TextButton(onPressed: () => editSavedCode(saved.id), child: const Text('修改')))),
+    ])),
+    box(Column(children: [
+      ListTile(contentPadding: EdgeInsets.zero, title: const Text('清空日志'), trailing: const Icon(Icons.delete_outline), onTap: c.clearDiagnostics),
+      ListTile(contentPadding: EdgeInsets.zero, title: const Text('复制诊断日志'), trailing: const Icon(Icons.copy), onTap: () async {
+        await Clipboard.setData(ClipboardData(text: c.diagnosticReport));
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('诊断日志已复制')));
+      }),
+      ListTile(contentPadding: EdgeInsets.zero, title: const Text('导出日志文件'), trailing: const Text('txt'), onTap: () => SharePlus.instance.share(
+        ShareParams(files: [XFile.fromData(Uint8List.fromList(utf8.encode(c.diagnosticReport)),
+          name: 'ant-bms-diagnostics.txt', mimeType: 'text/plain')], fileNameOverrides: ['ant-bms-diagnostics.txt']))),
+      muted('日志含设备标识，分享前请检查。最多保留 200 条，不含配对码或权限密码。'),
+    ])),
+    ConstrainedBox(constraints: const BoxConstraints(maxHeight: 320), child: SingleChildScrollView(child: Container(
+      width: double.infinity, padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(color: const Color(0xff0e191a), borderRadius: BorderRadius.circular(20)),
+      child: SelectableText(c.logs.reversed.take(c.history.logLines).toList().reversed.join('\n'),
+        style: const TextStyle(color: Color(0xff97dec2), fontFamily: 'monospace', fontSize: 11))))),
+  ];
+
+  List<Widget> snapshotWidgets() => [
+    box(Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const Text('离线快照', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
+      const SizedBox(height: 8), muted('保留最近 20 个快照；只读查看，不替换实时数据、不自动连接、不发送控制命令。'),
+      FilledButton.icon(onPressed: s != null && !c.stale && !c.snapshotSaving ? () async {
+        try {
+          await c.captureSnapshot();
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(c.snapshotError ?? '快照已保存')));
+        } catch (_) {
+          if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('需要新鲜的实时数据才能保存')));
+        }
+      } : null, icon: const Icon(Icons.camera_alt_outlined), label: Text(c.snapshotSaving ? '保存中…' : '保存当前快照')),
+      if (c.snapshotError != null) Text(c.snapshotError!),
+    ])),
+    ...c.snapshots.rows.map((row) => box(ListTile(contentPadding: EdgeInsets.zero,
+      title: Text('${row['name']} · ${row['demo'] == true ? "模拟" : "设备"}'),
+      subtitle: Text(DateTime.parse(row['time'] as String).toLocal().toString()),
+      trailing: const Icon(Icons.chevron_right), onTap: () => previewSnapshot(row)))),
+  ];
+
+  void previewSnapshot(Map<String, dynamic> row) {
+    Navigator.push(context, MaterialPageRoute<void>(builder: (ctx) => Scaffold(
+      appBar: AppBar(title: const Text('离线快照 · 只读'), actions: [IconButton(icon: const Icon(Icons.ios_share),
+        onPressed: () => SharePlus.instance.share(ShareParams(files: [
+          XFile.fromData(Uint8List.fromList(utf8.encode(jsonEncode(row))), name: 'ant-bms-snapshot.json', mimeType: 'application/json')],
+          fileNameOverrides: ['ant-bms-snapshot.json'])))]),
+      body: SafeArea(child: ListView(padding: const EdgeInsets.all(12), children: [
+        const Text('离线保存值，不是当前状态。导出包含设备标识，分享前请检查。'),
+        const SizedBox(height: 12),
+        BatteryDashboard(data: Map<String, dynamic>.from(row['data'] as Map),
+          identity: Map<String, String>.from(row['identity'] as Map), name: row['name'] as String,
+          connection: '离线快照', meter: row['family'] == 'lanbao', stale: true, demo: row['demo'] == true,
+          gpsEnabled: false, gpsSpeed: null, gpsDetail: '快照不包含 GPS 定位', onGps: null,
+          onConnect: null, onCells: null, onRecords: null, onControl: null, onDetails: null),
+      ])))));
+  }
+
   Widget param(String label, String value) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 8),
     child: Row(

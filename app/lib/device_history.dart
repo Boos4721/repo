@@ -22,6 +22,8 @@ class DeviceHistory {
   File? file;
   final List<SavedDevice> devices = [];
   bool autoConnect = true;
+  int pollMs = 600, logLines = 20;
+  bool frameLogging = false;
   String? autoId;
   Future<void> _tail = Future.value();
   SavedDevice? find(String? id) {
@@ -38,9 +40,13 @@ class DeviceHistory {
     }
     devices.sort((a, b) => b.connectedAt.compareTo(a.connectedAt));
     autoConnect = value['auto_connect'] != false;
+    pollMs = [300, 600, 900].contains(value['poll_ms']) ? value['poll_ms'] as int : 600;
+    logLines = [20, 80].contains(value['log_lines']) ? value['log_lines'] as int : 20;
+    frameLogging = value['frame_logging'] == true;
     autoId = value['auto_id'] is String && find(value['auto_id']) != null ? value['auto_id'] as String : null;
   }
   String encode() => jsonEncode({'version': 1, 'auto_connect': autoConnect,
+    'poll_ms': pollMs, 'log_lines': logLines, 'frame_logging': frameLogging,
     'auto_id': autoId, 'devices': devices.map((device) => device.toJson()).toList()});
   Future<void> load() async {
     final target = file;
