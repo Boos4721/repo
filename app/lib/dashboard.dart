@@ -93,8 +93,8 @@ class BatteryDashboard extends StatelessWidget {
             TextButton(onPressed: onConnect, child: Text(connection))]),
           info('设备名称', name),
           info('运行时间', elapsedSeconds(data?['runtime_s'] as num?)),
-          info('硬件版本', meter ? data?['hardware']?.toString() ?? '--' : identity['硬件版本'] ?? '--'),
-          info('软件版本', meter ? data?['firmware']?.toString() ?? '--' : identity['软件版本'] ?? '--'),
+          info('硬件版本', meter ? (data?['hardware']?.toString() ?? '--') : (identity['硬件版本'] ?? '--')),
+          info('软件版本', meter ? (data?['firmware']?.toString() ?? '--') : (identity['软件版本'] ?? '--')),
           info('电池类型', batteryChemistry(data?['battery_type'] as num?)),
           const SizedBox(height: 12),
           Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
