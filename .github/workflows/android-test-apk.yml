@@ -11,6 +11,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   apk:
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -61,3 +63,15 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           retention-days: 14
+      - name: Publish direct APK download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: android-test-${{ github.run_number }}
+          BUILD_SHA: ${{ github.sha }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --target "$BUILD_SHA" --prerelease --title "ANT BMS Android test $RELEASE_TAG" --notes-file dist/android-artifact/README.txt
+          fi
+          gh release upload "$RELEASE_TAG" dist/android-artifact/ANT-BMS-test.apk dist/android-artifact/SHA256SUMS.txt --clobber
+          echo "APK: https://github.com/$GH_REPO/releases/download/$RELEASE_TAG/ANT-BMS-test.apk" >> "$GITHUB_STEP_SUMMARY"
