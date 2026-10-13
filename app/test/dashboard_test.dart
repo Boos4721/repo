@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ant_bms/dashboard.dart';
 
-Widget dashboard({bool meter = false, Map<String, dynamic>? data}) => MaterialApp(home: Scaffold(
+Widget dashboard({bool meter = false, Map<String, dynamic>? data, ThemeData? theme}) => MaterialApp(theme: theme, home: Scaffold(
   body: SingleChildScrollView(child: Padding(padding: const EdgeInsets.all(12), child: BatteryDashboard(
     data: data, identity: const {}, name: meter ? 'BlueBabeQC6528' : 'ANT@TEST-BOARD',
     connection: '测试', meter: meter, stale: data == null, demo: false,
@@ -10,6 +10,15 @@ Widget dashboard({bool meter = false, Map<String, dynamic>? data}) => MaterialAp
     onConnect: null, onCells: null, onRecords: null, onControl: null, onDetails: null)))));
 
 void main() {
+  testWidgets('large dashboard preserves dark theme and unknown GPS', (tester) async {
+    await tester.pumpWidget(dashboard(theme: ThemeData.dark()));
+    expect(tester.takeException(), isNull);
+    expect(find.text('GPS · km/h'), findsOneWidget);
+    expect(find.text('剩余续航'), findsOneWidget);
+    final context = tester.element(find.byType(BatteryDashboard));
+    expect(Theme.of(context).brightness, Brightness.dark);
+    expect(find.text('0'), findsNothing);
+  });
   for (final width in [320.0, 375.0, 768.0]) {
     testWidgets('dashboard fits $width logical pixels', (tester) async {
       tester.view.physicalSize = Size(width, 900);

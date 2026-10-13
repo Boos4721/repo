@@ -775,7 +775,7 @@ class _BatteryHomeState extends State<BatteryHome> with WidgetsBindingObserver {
     )).toList())),
     if (appThemes.error != null) muted(appThemes.error!),
     heading('关于应用'),
-    box(const Text('ANT BMS · v0.9.0\n仅与设备通信；历史、记录和快照保存在本机。\n快照和模拟不发送控制命令。')),
+    box(const Text('ANT BMS · v0.9.1\n仅与设备通信；历史、记录和快照保存在本机。\n快照和模拟不发送控制命令。')),
   ];
 
   List<Widget> historyDevices() => [

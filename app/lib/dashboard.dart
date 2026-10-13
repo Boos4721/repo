@@ -64,17 +64,22 @@ class BatteryDashboard extends StatelessWidget {
   ]);
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final batteryTemperatures = (data?['temperatures_c'] as List? ?? [])
+        .whereType<num>().where((t) => t > -40 && t < 150).toList();
+    final temperature = batteryTemperatures.isEmpty ? '--' : batteryTemperatures.reduce(math.max).toStringAsFixed(0);
+    final speed = gpsEnabled ? gpsSpeed : null;
     final metrics = [
-      ('总电压', number('voltage_v', 2), 'V', Icons.bolt, Theme.of(context).colorScheme.primary),
-      ('电流', number('current_a', 1), 'A', Icons.swap_horiz, const Color(0xff32b7b7)),
-      ('功率', number('power_w', 0), 'W', Icons.flash_on, const Color(0xff547ff2)),
-      ('最高单体', number('max_cell_v', 3), 'V', Icons.arrow_upward, const Color(0xffea687e)),
-      ('最低单体', number('min_cell_v', 3), 'V', Icons.arrow_downward, const Color(0xffeca849)),
+      ('电池电压', number('voltage_v', 2), 'V', Icons.bolt, scheme.primary),
+      ('电池电流', number('current_a', 1), 'A', Icons.swap_horiz, const Color(0xff32b7b7)),
+      ('电池功率', number('power_w', 0), 'W', Icons.flash_on, const Color(0xff547ff2)),
+      ('电芯压差', data?['delta_v'] == null ? '--' : ((data!['delta_v'] as num) * 1000).toStringAsFixed(0), 'mV', Icons.equalizer, const Color(0xffa26ee4)),
+      ('电池温度', temperature, '°C', Icons.thermostat, const Color(0xffea687e)),
+      ('均衡温度', meter ? '--' : number('balance_temperature_c', 0), '°C', Icons.device_thermostat, const Color(0xff55b67c)),
+      ('最高单体', number('max_cell_v', 3), 'V', Icons.battery_full, const Color(0xffea687e)),
+      ('最低单体', number('min_cell_v', 3), 'V', Icons.battery_0_bar, const Color(0xffeca849)),
       ('平均单体', number('average_v', 3), 'V', Icons.show_chart, const Color(0xff55b67c)),
-      ('压差', data?['delta_v'] == null ? '--' : ((data!['delta_v'] as num) * 1000).toStringAsFixed(0),
-        'mV', Icons.equalizer, const Color(0xffa26ee4)),
-      (meter ? '模块循环次数' : '循环容量', number(meter ? 'cycle_count' : 'cycle_ah', meter ? 0 : 1),
-        meter ? '次' : 'Ah', Icons.loop, const Color(0xff5a9bc7)),
+      ('剩余续航', '--', 'km', Icons.route, scheme.primary),
     ];
     final sensors = <(String, num?)>[
       if (!meter) ('MOS', data?['mos_temperature_c'] as num?),
@@ -85,6 +90,42 @@ class BatteryDashboard extends StatelessWidget {
     return Column(children: [
         if (demo || stale) card(context, Text(demo ? '模拟电池 · 非真实硬件数据' : '最后读数 · 当前数据未更新',
           style: const TextStyle(color: Color(0xffb97b19), fontSize: 12))),
+        Padding(padding: const EdgeInsets.only(bottom: 8), child: Row(children: [
+          Icon(Icons.bluetooth, size: 16, color: scheme.primary), const SizedBox(width: 6),
+          Expanded(child: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 12, color: scheme.primary))),
+          TextButton(onPressed: onConnect, child: Text(connection)),
+        ])),
+        Center(child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 540), child:
+          SizedBox(height: 240, width: double.infinity, child: Stack(children: [
+            Positioned.fill(child: CustomPaint(painter: SocGaugePainter(
+              speed == null ? null : speed / 120 * 100, color: scheme.primary,
+              track: scheme.outlineVariant, strokeWidth: 28))),
+            Align(alignment: const Alignment(0, .08), child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text(speed?.toStringAsFixed(0) ?? '--', style: TextStyle(fontSize: 64,
+                height: 1.1, fontWeight: FontWeight.w800, color: scheme.primary)),
+              Text('GPS · km/h', style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+              const SizedBox(height: 12),
+              Text('${number('remaining_ah', 1)} Ah / ${number('capacity_ah', 1)} Ah',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: scheme.primary)),
+            ])),
+          ])))),
+        card(context, Row(children: [
+          Text('SOC:', style: TextStyle(fontWeight: FontWeight.w700, color: scheme.onSurfaceVariant)),
+          const SizedBox(width: 10),
+          Text('${number('soc', 0)}%', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w800, color: scheme.primary)),
+          const Spacer(), Text(state, style: TextStyle(color: scheme.onSurfaceVariant)),
+        ])),
+        LayoutBuilder(builder: (context, constraints) {
+          final columns = constraints.maxWidth >= 600 ? 4 : 2;
+          return Wrap(spacing: 12, children: metrics.map((m) => SizedBox(
+            width: (constraints.maxWidth - (columns - 1) * 12) / columns,
+            child: card(context, SizedBox(height: 74, child: Center(
+              child: smallMetric(context, m.$1, m.$2, m.$3, m.$4, m.$5))),
+              padding: const EdgeInsets.all(12)))).toList());
+        }),
+        Align(alignment: Alignment.centerLeft, child: Padding(padding: const EdgeInsets.only(bottom: 12),
+          child: Text('续航暂未估算 · 未收到的指标显示 --', style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant)))),
         card(context, Column(children: [
           Row(children: [Expanded(child: Text(meter ? '蓝宝电量计' : '蚂蚁 BMS',
             style: TextStyle(color: Theme.of(context).colorScheme.primary, fontSize: 15, fontWeight: FontWeight.w600))),
@@ -105,24 +146,11 @@ class BatteryDashboard extends StatelessWidget {
             ])),
             const SizedBox(width: 14),
             Expanded(child: Column(children: [
-              SizedBox(height: 116, width: double.infinity, child: Stack(children: [
-                Positioned.fill(child: CustomPaint(painter: SocGaugePainter(data?['soc'] as num?, color: Theme.of(context).colorScheme.primary, track: Theme.of(context).colorScheme.outlineVariant))),
-                Align(alignment: const Alignment(0, .05), child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  const Text('SOC', style: TextStyle(color: Color(0xff8796a5), fontSize: 12)),
-                  Text('${number('soc', 0)}%', style: TextStyle(fontSize: 30, color: Theme.of(context).colorScheme.primary, fontWeight: FontWeight.w600)),
-                ])),
-              ])),
               Text('总容量 ${number('capacity_ah', 1)} Ah', style: const TextStyle(fontSize: 11)),
               const SizedBox(height: 4), Text('剩余 ${number('remaining_ah', 1)} Ah', style: const TextStyle(fontSize: 11)),
             ])),
           ]),
         ])),
-        card(context, LayoutBuilder(builder: (_, constraints) {
-          final columns = constraints.maxWidth >= 500 ? 4 : constraints.maxWidth >= 300 ? 3 : 2;
-          return Wrap(spacing: 12, runSpacing: 24, children: metrics.map((m) => SizedBox(
-            width: (constraints.maxWidth - (columns - 1) * 12) / columns,
-            child: smallMetric(context, m.$1, m.$2, m.$3, m.$4, m.$5))).toList());
-        })),
         card(context, Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Expanded(child: alarms(context, '保护信息', decodeBmsBits(data?['protection_bits'] as String?))),
           const SizedBox(width: 16),
@@ -158,17 +186,18 @@ class BatteryDashboard extends StatelessWidget {
 class SocGaugePainter extends CustomPainter {
   final num? soc;
   final Color color, track;
-  SocGaugePainter(this.soc, {this.color = BatteryDashboard.blue, this.track = const Color(0xffe5eaf0)});
+  final double strokeWidth;
+  SocGaugePainter(this.soc, {this.color = BatteryDashboard.blue, this.track = const Color(0xffe5eaf0), this.strokeWidth = 10});
   @override
   void paint(Canvas canvas, Size size) {
-    final radius = math.min(size.width / 2 - 8, size.height * .58);
+    final radius = math.min(size.width / 2 - strokeWidth / 2 - 2, size.height * .58);
     final center = Offset(size.width / 2, size.height * .76);
     final rect = Rect.fromCircle(center: center, radius: radius);
-    final paint = Paint()..style = PaintingStyle.stroke..strokeWidth = 10..strokeCap = StrokeCap.round;
+    final paint = Paint()..style = PaintingStyle.stroke..strokeWidth = strokeWidth..strokeCap = StrokeCap.round;
     canvas.drawArc(rect, math.pi, math.pi, false, paint..color = track);
     if (soc != null) canvas.drawArc(rect, math.pi, math.pi * soc!.toDouble().clamp(0, 100) / 100,
         false, paint..color = color);
   }
   @override
-  bool shouldRepaint(covariant SocGaugePainter old) => old.soc != soc || old.color != color || old.track != track;
+  bool shouldRepaint(covariant SocGaugePainter old) => old.soc != soc || old.color != color || old.track != track || old.strokeWidth != strokeWidth;
 }
