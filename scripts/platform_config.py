@@ -22,7 +22,7 @@ if manifest.exists():
 for name in ['build.gradle.kts','build.gradle']:
     gradle=root/'android/app'/name
     if gradle.exists():
-        text=gradle.read_text().replace('minSdk = flutter.minSdkVersion','minSdk = 26').replace('minSdkVersion flutter.minSdkVersion','minSdkVersion 26')
+        text=gradle.read_text().replace('minSdk = flutter.minSdkVersion','minSdk = 30').replace('minSdkVersion flutter.minSdkVersion','minSdkVersion 30')
         text=text.replace('compileSdk = flutter.compileSdkVersion', 'compileSdk = 37').replace('compileSdkVersion flutter.compileSdkVersion', 'compileSdkVersion 37')
         gradle.write_text(text)
 info=root/'ios/Runner/Info.plist'

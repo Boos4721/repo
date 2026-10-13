@@ -13,7 +13,7 @@ binary = (root / 'app/build/app/outputs/flutter-apk/app-release.apk' if platform
 if not binary.is_file():
     raise SystemExit(f'Missing binary: {binary}')
 name = 'ANT-BMS-test.apk' if platform == 'android' else binary.name
-notes = ('Android 8.0+ 测试版，使用测试签名，不用于正式发布。\n'
+notes = ('Android 11+ 测试版，使用测试签名，不用于正式发布。\n'
          '不同 CI 构建的测试签名可能不同，不能保证覆盖安装；卸载会清除本机数据，请先导出记录。\n'
          if platform == 'android' else 'iOS 未签名测试版，需自行使用有效证书重新签名后安装。\n')
 digest = hashlib.sha256(binary.read_bytes()).hexdigest()
